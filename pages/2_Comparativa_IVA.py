@@ -3,6 +3,11 @@ import pandas as pd
 import io
 from datetime import datetime
 
+if not st.session_state.get("authentication_status"):
+    st.warning("⚠️ Debe iniciar sesión primero.")
+    st.page_link("Inicio.py", label="Ir al login", icon="🔐")
+    st.stop()
+
 st.set_page_config(page_title="Comparativa IVA Facturas", page_icon="🧾", layout="wide")
 
 st.markdown("""
