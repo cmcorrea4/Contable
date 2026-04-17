@@ -8,7 +8,7 @@ st.set_page_config(
     page_title="Portal Contable",
     page_icon="🏢",
     layout="wide",
-    initial_sidebar_ebar_state="expanded"
+    initial_sidebar_state="expanded"
 )
 
 # ── Estilos CSS ──────────────────────────────────────────────────────────────
