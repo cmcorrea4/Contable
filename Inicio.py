@@ -14,7 +14,32 @@ st.set_page_config(
 # ── Estilos CSS ──────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-    .stApp { background-color: #F5F7FA; }
+    /* Forzar tema claro global */
+    .stApp { background-color: #F5F7FA !important; color: #1E293B !important; }
+    [data-testid="stSidebar"] { background-color: #FFFFFF !important; }
+    [data-testid="stSidebar"] * { color: #1E293B !important; }
+
+    /* Inputs del login: fondo blanco, texto oscuro */
+    input[type="text"], input[type="password"] {
+        background-color: #FFFFFF !important;
+        color: #1E293B !important;
+        border: 1px solid #CBD5E1 !important;
+        border-radius: 8px !important;
+    }
+    div[data-baseweb="input"],
+    div[data-baseweb="base-input"] {
+        background-color: #FFFFFF !important;
+    }
+
+    /* Botón Login */
+    button[kind="secondaryFormSubmit"] {
+        background-color: #0A2342 !important;
+        color: white !important;
+        border-radius: 8px !important;
+        border: none !important;
+        font-weight: 600 !important;
+    }
+
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
