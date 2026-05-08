@@ -6,6 +6,11 @@ from langchain_openai import ChatOpenAI
 import warnings
 warnings.filterwarnings('ignore')
 
+if not st.session_state.get("authentication_status"):
+    st.warning("⚠️ Debe iniciar sesión primero.")
+    st.page_link("Inicio.py", label="Ir al login", icon="🔐")
+    st.stop()
+
 def main():
     st.set_page_config(
         page_title="Agente de Datos",
