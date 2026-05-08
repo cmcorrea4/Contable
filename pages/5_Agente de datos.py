@@ -83,7 +83,7 @@ def main():
     """, unsafe_allow_html=True)
     
     # ── Configuración del modelo ─────────────────────────────────────────────────
-    openai_api_key = st.secrets["key"]
+    openai_api_key = st.secrets["settings"]["key"]
     model_name = "gpt-4.1-2025-04-14"
     temperature = 0.1
     
