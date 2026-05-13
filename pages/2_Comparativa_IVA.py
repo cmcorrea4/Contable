@@ -84,7 +84,6 @@ def cargar_libro_iva(archivo):
 
     df_pos = df[df[col_vic] > 0][[col_id, col_nombre, col_vic]].copy()
     df_neg = df[df[col_vic] < 0][[col_id, col_nombre, col_vic]].copy()
-    # Para comparar, trabajamos con el valor absoluto de los negativos
     df_neg = df_neg.copy()
     df_neg[col_vic] = df_neg[col_vic].abs()
 
@@ -111,23 +110,29 @@ def comparar(df_fact, col_nit, col_nombre_f, col_iva,
         nombre_f = str(row[col_nombre_f]).strip()
         iva      = round(float(row[col_iva]), 2) if pd.notna(row[col_iva]) else 0.0
         nit_ok   = nit in idx_nit_iva
-        iva_ok   = nit_ok and any(abs(iva - v) <= tolerancia for v in idx_nit_iva[nit])
         nombre_l = idx_nit_nombre.get(nit, "") if nit_ok else ""
 
-        if nit_ok and iva_ok:
+        # ── Lógica IVA = 0: no se cruza contra el libro, se marca correcto directamente ──
+        if iva == 0.0:
+            estado = "✅ CORRECTO (IVA $0)"
+            iva_ok = True
+        elif nit_ok and any(abs(iva - v) <= tolerancia for v in idx_nit_iva[nit]):
             estado = "✅ CORRECTO"
+            iva_ok = True
         elif nit_ok:
             estado = "⚠️ NIT OK / IVA NO ENCONTRADO"
+            iva_ok = False
         else:
             estado = "❌ NIT NO ENCONTRADO"
+            iva_ok = False
 
         filas.append({
-            "NIT Emisor":    nit,
-            "Nombre Emisor": nombre_f,
-            "IVA Documento": iva,
+            "NIT Emisor":            nit,
+            "Nombre Emisor":         nombre_f,
+            "IVA Documento":         iva,
             "Nombre Tercero (Libro)": nombre_l,
-            "IVA en Libro":  "✅" if iva_ok else "❌",
-            "Estado":        estado,
+            "IVA en Libro":          "✅" if iva_ok else "❌",
+            "Estado":                estado,
         })
     return pd.DataFrame(filas)
 
@@ -142,7 +147,8 @@ def exportar_excel(df_fact_res, df_nc_res):
 
 def mostrar_resultado(df_res, key_prefix):
     total     = len(df_res)
-    correctos = (df_res["Estado"] == "✅ CORRECTO").sum()
+    # Correctos incluye tanto "✅ CORRECTO" como "✅ CORRECTO (IVA $0)"
+    correctos = df_res["Estado"].str.startswith("✅").sum()
     iva_no    = (df_res["Estado"] == "⚠️ NIT OK / IVA NO ENCONTRADO").sum()
     nit_no    = (df_res["Estado"] == "❌ NIT NO ENCONTRADO").sum()
     pct       = round(correctos / total * 100, 1) if total > 0 else 0
@@ -166,15 +172,18 @@ def mostrar_resultado(df_res, key_prefix):
         key=f"filtro_{key_prefix}"
     )
     df_m = df_res.copy()
-    if filtro == "Solo ✅ CORRECTOS":           df_m = df_m[df_m["Estado"] == "✅ CORRECTO"]
-    elif filtro == "Solo ⚠️ NIT OK / IVA NO":  df_m = df_m[df_m["Estado"] == "⚠️ NIT OK / IVA NO ENCONTRADO"]
-    elif filtro == "Solo ❌ NIT NO ENCONTRADO": df_m = df_m[df_m["Estado"] == "❌ NIT NO ENCONTRADO"]
+    if filtro == "Solo ✅ CORRECTOS":
+        df_m = df_m[df_m["Estado"].str.startswith("✅")]
+    elif filtro == "Solo ⚠️ NIT OK / IVA NO":
+        df_m = df_m[df_m["Estado"] == "⚠️ NIT OK / IVA NO ENCONTRADO"]
+    elif filtro == "Solo ❌ NIT NO ENCONTRADO":
+        df_m = df_m[df_m["Estado"] == "❌ NIT NO ENCONTRADO"]
 
     def color_fila(row):
         e = str(row["Estado"])
-        if "CORRECTO" in e: return ["background-color:#F0FFF4"] * len(row)
-        elif "NIT OK" in e: return ["background-color:#FFF8E1"] * len(row)
-        else:               return ["background-color:#FFF5F5"] * len(row)
+        if e.startswith("✅"):  return ["background-color:#F0FFF4"] * len(row)
+        elif "NIT OK" in e:     return ["background-color:#FFF8E1"] * len(row)
+        else:                   return ["background-color:#FFF5F5"] * len(row)
 
     st.dataframe(df_m.style.apply(color_fila, axis=1), use_container_width=True, height=440)
     st.markdown('</div>', unsafe_allow_html=True)
