@@ -242,6 +242,19 @@ def build_col_idx(ws, hr):
     return col_idx
 
 
+def _es_valor_numerico(v):
+    """Devuelve True si v es un número real (no NaN, no texto vacío)."""
+    if v is None:
+        return False
+    if isinstance(v, (int, float)):
+        return not pd.isna(v)
+    try:
+        float(str(v).replace(",", "").replace("$", "").strip())
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
 def ejecutar_traslado_doble(
     raw_32, hoja_32, hr_32,
     df_datos, mapa_src_datos, mapa_dst_datos, n_filas_bloque1,
@@ -255,6 +268,7 @@ def ejecutar_traslado_doble(
 
     # ── BLOQUE 1: hoja DATOS fila a fila ─────────────────────────────────────
     primera_dato = hr_32 + 1
+    # FIX: usar n_filas_bloque1 (len del df origen) para no escribir filas vacías
     df_d = df_datos.iloc[:n_filas_bloque1].reset_index(drop=True)
     n_ok = 0
 
@@ -286,16 +300,22 @@ def ejecutar_traslado_doble(
             val_dina = ws.cell(r, cn_dina).value if cn_dina else None
             if val_dina is not None and str(val_dina).strip().upper() == "SN":
                 filas_sn.append(r)
-                
-        # Filtrar filas de df_resumen que son encabezados (por ej. contienen "ID", "NOMBRECOMPLETO")
+
+        # FIX: filtrar filas de df_resumen que NO tienen un valor numérico real
+        # en la columna "valor". Esto descarta encabezados, subtotales de texto
+        # y filas totalmente vacías sin importar el tamaño de la nómina.
+        src_val_col = mapa_src_resumen.get("valor")
         filas_validas = []
         for _, row in df_resumen.iterrows():
-            row_str = " ".join(str(v).upper() for v in row.values)
-            if "NOMBRECOMPLETO" in row_str or "CEDULA" in row_str or "SALARIO NETO" in row_str:
-                continue
-            filas_validas.append(row)
-            
-        df_resumen_limpio = pd.DataFrame(filas_validas) if filas_validas else pd.DataFrame(columns=df_resumen.columns)
+            v = row.get(src_val_col) if src_val_col else None
+            if _es_valor_numerico(v):
+                filas_validas.append(row)
+
+        df_resumen_limpio = (
+            pd.DataFrame(filas_validas, columns=df_resumen.columns)
+            if filas_validas
+            else pd.DataFrame(columns=df_resumen.columns)
+        )
 
         n_sn = min(len(df_resumen_limpio), len(filas_sn))
 
@@ -317,10 +337,17 @@ def ejecutar_traslado_doble(
                     val = None
                 ws.cell(fila_excel, cn, value=val)
 
-        if len(df_resumen) > len(filas_sn):
+        if len(df_resumen_limpio) > len(filas_sn):
             warns.append(
-                f"Nomina resumen tiene {len(df_resumen)} filas "
-                f"pero solo hay {len(filas_sn)} filas SN en el 3.2."
+                f"Nomina resumen tiene {len(df_resumen_limpio)} filas válidas "
+                f"pero solo hay {len(filas_sn)} filas SN en el 3.2. "
+                f"Se escribieron {n_sn}."
+            )
+        elif len(filas_sn) > len(df_resumen_limpio):
+            warns.append(
+                f"Hay {len(filas_sn)} filas SN en el 3.2 pero solo "
+                f"{len(df_resumen_limpio)} filas válidas en Nomina resumen. "
+                f"Las filas SN sobrantes quedan sin modificar."
             )
 
     buf = io.BytesIO()
@@ -341,8 +368,6 @@ st.markdown("""
         <b>Bloque 2:</b> hoja Nomina resumen → filas SN del 3.2
     </p>
 </div>""", unsafe_allow_html=True)
-
-
 
 st.markdown("---")
 
@@ -481,16 +506,21 @@ if f33 and f32:
         st.markdown('<div class="bloque-box-sn"><p class="section-title-sn">🔵 Bloque 2 — Nomina resumen (filas SN)</p>',
                     unsafe_allow_html=True)
         if df_resumen is not None:
+            # Vista previa también filtrada por valor numérico
+            src_val_prev = m_resumen.get("valor")
+            mask_prev = df_resumen[src_val_prev].apply(_es_valor_numerico) if src_val_prev and src_val_prev in df_resumen.columns else pd.Series([True] * len(df_resumen))
+            df_prev2 = df_resumen[mask_prev]
             prev2 = {}
             for dest, src in [
                 (f"→ {m32['cedula']}",     m_resumen.get("id")),
                 (f"→ {m32['nombre_emp']}", m_resumen.get("nombre")),
                 (f"→ {m32['valor']}",      m_resumen.get("valor")),
             ]:
-                if src and src in df_resumen.columns:
-                    prev2[dest] = df_resumen[src].values
+                if src and src in df_prev2.columns:
+                    prev2[dest] = df_prev2[src].values
                 else:
-                    prev2[dest] = ["⚠️ no detectada"] * len(df_resumen)
+                    prev2[dest] = ["⚠️ no detectada"] * len(df_prev2)
+            st.caption(f"Filas válidas (con valor numérico): **{len(df_prev2)}** de {len(df_resumen)} totales")
             st.dataframe(pd.DataFrame(prev2), use_container_width=True, height=300)
         else:
             st.warning("Hoja 'Nomina resumen' no encontrada en el 3.3")
@@ -498,7 +528,17 @@ if f33 and f32:
 
     # ── Métricas ──────────────────────────────────────────────────────────────
     n_datos_33 = len(df_datos)
-    n_res_33   = len(df_resumen) if df_resumen is not None else 0
+
+    # Métrica de resumen también con filtro real
+    if df_resumen is not None:
+        src_val_m = m_resumen.get("valor")
+        if src_val_m and src_val_m in df_resumen.columns:
+            n_res_33 = int(df_resumen[src_val_m].apply(_es_valor_numerico).sum())
+        else:
+            n_res_33 = len(df_resumen)
+    else:
+        n_res_33 = 0
+
     n_32       = len(df_32)
     n_sn_32    = 0
     if m32["cod_dina"] and m32["cod_dina"] in df_32.columns:
@@ -512,7 +552,7 @@ if f33 and f32:
                     f'<div class="label">Filas DATOS (3.3)</div></div>', unsafe_allow_html=True)
     with c2:
         st.markdown(f'<div class="metric-card"><div class="number blue">{n_res_33}</div>'
-                    f'<div class="label">Filas Resumen (3.3)</div></div>', unsafe_allow_html=True)
+                    f'<div class="label">Filas válidas Resumen (3.3)</div></div>', unsafe_allow_html=True)
     with c3:
         st.markdown(f'<div class="metric-card"><div class="number blue">{n_32}</div>'
                     f'<div class="label">Filas totales (3.2)</div></div>', unsafe_allow_html=True)
@@ -523,7 +563,7 @@ if f33 and f32:
 
     if n_sn_32 != n_res_33 and n_res_33 > 0:
         st.markdown(
-            f'<div class="warn-box">⚠️ Nomina resumen tiene <b>{n_res_33}</b> filas '
+            f'<div class="warn-box">⚠️ Nomina resumen tiene <b>{n_res_33}</b> filas válidas '
             f'pero se encontraron <b>{n_sn_32}</b> filas SN en el 3.2. '
             f'Se escribirán <b>{min(n_sn_32, n_res_33)}</b>.</div>',
             unsafe_allow_html=True
@@ -569,7 +609,8 @@ if f33 and f32:
         with st.spinner("Procesando los dos bloques..."):
             resultado, n_ok, warns = ejecutar_traslado_doble(
                 raw_32, hoja_32, hr_32,
-                df_datos, mapa_src_datos, mapa_dst_datos, n_32,
+                df_datos, mapa_src_datos, mapa_dst_datos,
+                len(df_datos),          # FIX: tamaño real del origen, no del destino
                 df_resumen, mapa_src_resumen, mapa_dst_resumen,
                 m32["cod_dina"]
             )
