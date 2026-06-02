@@ -20,10 +20,8 @@ st.set_page_config(
 # ── Estilos ──────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-    /* Fondo general */
     .stApp { background-color: #F5F7FA; }
 
-    /* Encabezado */
     .header-block {
         background: linear-gradient(135deg, #1E3A5F 0%, #2E6DA4 100%);
         border-radius: 12px;
@@ -34,7 +32,6 @@ st.markdown("""
     .header-block h1 { font-size: 1.9rem; margin: 0; font-weight: 700; }
     .header-block p  { margin: 6px 0 0; opacity: .85; font-size: .95rem; }
 
-    /* Tarjetas de métricas */
     .metric-card {
         background: white;
         border-radius: 10px;
@@ -59,8 +56,8 @@ st.markdown("""
     .red    { color: #D63B3B; }
     .blue   { color: #2E6DA4; }
     .orange { color: #E07B20; }
+    .purple { color: #7B3FA0; }
 
-    /* Sección de upload */
     .upload-section {
         background: white;
         border-radius: 10px;
@@ -77,15 +74,9 @@ st.markdown("""
         border-bottom: 2px solid #E8EDF3;
     }
 
-    /* Badges en tabla */
-    .badge-ok   { background:#D4EDDA; color:#155724; padding:3px 10px; border-radius:12px; font-size:.8rem; font-weight:600; }
-    .badge-fail { background:#F8D7DA; color:#721C24; padding:3px 10px; border-radius:12px; font-size:.8rem; font-weight:600; }
-
-    /* Ocultar elementos Streamlit genéricos */
     #MainMenu, footer, header { visibility: hidden; }
     .block-container { padding-top: 1.5rem; }
 
-    /* Tabla resultado */
     .result-block {
         background: white;
         border-radius: 10px;
@@ -99,19 +90,13 @@ st.markdown("""
 
 # ── Funciones ────────────────────────────────────────────────────────────────
 
-def redondear(valor, decimales=2):
-    """Redondea un valor numérico."""
-    try:
-        return round(float(valor), decimales)
-    except Exception:
-        return None
-
-
 def cargar_extracto(archivo) -> tuple:
     """
-    Lee el extracto bancario (CSV, TXT o Excel) y devuelve:
-      - serie_col_i: columna I (índice 8) con valores numéricos
-      - desc_col_g:  columna G (índice 6) con descripciones
+    Lee el extracto bancario (CSV, TXT o Excel).
+    Devuelve:
+      - serie_col_i : columna I (índice 8) con los montos
+      - desc_col_g  : columna G (índice 6) con descripciones
+    Excluye filas de saldo (SALDO INICIAL, SALDO DIA, SALDO FINAL).
     """
     nombre = archivo.name.lower()
     es_excel = nombre.endswith(".xlsx") or nombre.endswith(".xls")
@@ -136,20 +121,31 @@ def cargar_extracto(archivo) -> tuple:
                 continue
 
     if df is None or df.shape[1] < 9:
-        st.error(f"El archivo no tiene suficientes columnas (se necesitan al menos 9). Columnas detectadas: {df.shape[1] if df is not None else 0}")
+        st.error(
+            f"El archivo no tiene suficientes columnas (se necesitan al menos 9). "
+            f"Columnas detectadas: {df.shape[1] if df is not None else 0}"
+        )
         return None, None
 
-    col_i = pd.to_numeric(df[8], errors="coerce").dropna()
-    desc_col_g = df[6].fillna("").astype(str).str.strip()
+    # Excluir filas de saldo que no son transacciones reales
+    desc_raw = df[6].fillna("").astype(str).str.strip().str.upper()
+    mask_saldo = desc_raw.str.startswith("SALDO")
+    df = df[~mask_saldo].copy()
 
-    return col_i.reset_index(drop=True), desc_col_g
+    col_i    = pd.to_numeric(df[8], errors="coerce").dropna()
+    desc_col = df[6].fillna("").astype(str).str.strip()
+
+    return col_i.reset_index(drop=True), desc_col.reset_index(drop=True)
 
 
-def cargar_excel(archivo) -> pd.DataFrame:
-    """Lee el Excel, detecta la fila de encabezados y devuelve Débito y Crédito."""
+def cargar_excel(archivo) -> tuple:
+    """
+    Lee el libro contable Excel.
+    Detecta la fila de encabezados buscando 'Crédito' o 'Credito'.
+    Devuelve (df, col_debito, col_credito, col_tercero).
+    """
     df_raw = pd.read_excel(archivo, sheet_name=0, header=None)
 
-    # Detectar fila de encabezado buscando 'Crédito'
     header_row = None
     for i, row in df_raw.iterrows():
         vals = [str(v).strip().lower() for v in row.values]
@@ -164,7 +160,6 @@ def cargar_excel(archivo) -> pd.DataFrame:
     df = df_raw.iloc[header_row + 1:].copy()
     df.columns = [str(c).strip() for c in df_raw.iloc[header_row].values]
 
-    # Buscar columnas flexiblemente
     col_debito = next(
         (c for c in df.columns if "d" in c.lower() and "bito" in c.lower()), None
     )
@@ -173,7 +168,10 @@ def cargar_excel(archivo) -> pd.DataFrame:
     )
 
     if not col_debito or not col_credito:
-        st.error(f"No se encontraron columnas Débito/Crédito. Columnas disponibles: {list(df.columns)}")
+        st.error(
+            f"No se encontraron columnas Débito/Crédito. "
+            f"Columnas disponibles: {list(df.columns)}"
+        )
         return None
 
     col_tercero = next(
@@ -192,68 +190,96 @@ def cargar_excel(archivo) -> pd.DataFrame:
     return resultado, col_debito, col_credito, col_tercero
 
 
-def comparar(serie_csv: pd.Series, desc_csv: pd.Series,
-             df_excel: pd.DataFrame, col_debito: str, col_credito: str,
-             col_tercero: str, tolerancia: float):
+def comparar(
+    serie_csv: pd.Series,
+    desc_csv: pd.Series,
+    df_excel: pd.DataFrame,
+    col_debito: str,
+    col_credito: str,
+    col_tercero: str,
+    tolerancia: float,
+) -> pd.DataFrame:
     """
-    Regla de negocio:
-      - Valores NEGATIVOS del CSV  → buscar (valor absoluto) en Crédito del Excel
-      - Valores POSITIVOS del CSV  → buscar en Débito del Excel
-    Enriquecimiento:
-      - Encontrados    → muestra Nombre del tercero del Excel
-      - No encontrados → muestra Descripción (col G) del CSV
+    Para CADA valor del CSV (en valor absoluto) busca coincidencia
+    en la columna Débito Y en la columna Crédito del Excel.
+
+    Casos de estado:
+      ✅ En Débito        → encontrado solo en Débito
+      ✅ En Crédito       → encontrado solo en Crédito
+      ✅ En Débito y Crédito → encontrado en ambas columnas
+      ❌ No encontrado    → no está en ninguna
+
+    También reporta el Nombre del Tercero de cada coincidencia.
     """
-    # Construir mapas valor → nombre tercero
-    map_debito  = {}
-    map_credito = {}
-    if col_tercero:
+    # Construir mapas  valor_redondeado → nombre_tercero   para cada columna
+    def build_map(col_name):
+        m = {}
         for _, row in df_excel.iterrows():
-            nombre = str(row[col_tercero]).strip() if pd.notna(row[col_tercero]) else ""
-            if pd.notna(row[col_debito]):
-                v = round(float(row[col_debito]), 2)
-                if v not in map_debito:
-                    map_debito[v] = nombre
-            if pd.notna(row[col_credito]):
-                v = round(float(row[col_credito]), 2)
-                if v not in map_credito:
-                    map_credito[v] = nombre
+            v = row[col_name]
+            if pd.isna(v) or v == 0:
+                continue
+            vr = round(float(v), 2)
+            if vr not in m:
+                nombre = (
+                    str(row[col_tercero]).strip()
+                    if col_tercero and pd.notna(row[col_tercero])
+                    else ""
+                )
+                m[vr] = nombre
+        return m
+
+    map_debito  = build_map(col_debito)
+    map_credito = build_map(col_credito)
 
     set_debito  = set(map_debito.keys())
     set_credito = set(map_credito.keys())
 
     filas = []
-    for idx, val in serie_csv.items():
-        val_r       = round(float(val), 2)
-        es_negativo = val_r < 0
-        val_abs     = round(abs(val_r), 2)
-        desc        = str(desc_csv.get(idx, "")).strip()
+    for idx in range(len(serie_csv)):
+        val   = serie_csv.iloc[idx]
+        desc  = str(desc_csv.iloc[idx]).strip() if idx < len(desc_csv) else ""
 
-        if es_negativo:
-            match_v = next((v for v in set_credito if abs(val_abs - v) <= tolerancia), None)
-            encontrado_col  = match_v is not None
-            columna_destino = col_credito
-            nombre_tercero  = map_credito.get(match_v, "") if match_v else ""
+        val_r   = round(float(val), 2)
+        val_abs = round(abs(val_r), 2)
+
+        # Buscar en Débito
+        match_d = next(
+            (v for v in set_debito if abs(val_abs - v) <= tolerancia), None
+        )
+        # Buscar en Crédito
+        match_c = next(
+            (v for v in set_credito if abs(val_abs - v) <= tolerancia), None
+        )
+
+        en_debito  = match_d is not None
+        en_credito = match_c is not None
+
+        nombre_d = map_debito.get(match_d, "")  if en_debito  else ""
+        nombre_c = map_credito.get(match_c, "") if en_credito else ""
+
+        # Estado consolidado
+        if en_debito and en_credito:
+            estado = "✅ En Débito y Crédito"
+        elif en_debito:
+            estado = "✅ En Débito"
+        elif en_credito:
+            estado = "✅ En Crédito"
         else:
-            match_v = next((v for v in set_debito if abs(val_r - v) <= tolerancia), None)
-            encontrado_col  = match_v is not None
-            columna_destino = col_debito
-            nombre_tercero  = map_debito.get(match_v, "") if match_v else ""
+            estado = "❌ No encontrado"
 
-        if encontrado_col:
-            estado = "✅ CORRECTO"
-        else:
-            estado = "❌ NO ENCONTRADO"
+        # Nombre único (si coincide en ambas, mostrar el más informativo)
+        nombre_tercero = nombre_d or nombre_c
 
-        fila = {
-            "Valor CSV (Col I)":  val_r,
-            "Descripción CSV":    desc,
-            "Tipo":               "Negativo → Crédito" if es_negativo else "Positivo → Débito",
-            f"En {columna_destino}": "✅" if encontrado_col else "❌",
-
-            "Nombre del tercero": nombre_tercero if encontrado_col else "",
-            "Estado":             estado,
-        }
-        filas.append(fila)
+        filas.append(
+            {
+                "Valor CSV (Col I)":   val_r,
+                "Descripción CSV":     desc,
+                f"En {col_debito}":    "✅" if en_debito  else "❌",
+                f"En {col_credito}":   "✅" if en_credito else "❌",
+                "Nombre del tercero":  nombre_tercero,
+                "Estado":              estado,
+            }
+        )
 
     return pd.DataFrame(filas)
 
@@ -270,7 +296,8 @@ def exportar_excel(df_resultado: pd.DataFrame) -> bytes:
 st.markdown("""
 <div class="header-block">
     <h1>🔍 Comparativa Contable</h1>
-    <p>Verifica si los valores de la columna I del extracto bancario (CSV) están registrados en el libro contable (Excel)</p>
+    <p>Verifica si los valores del extracto bancario (CSV) están registrados en <strong>Débito</strong>
+    o <strong>Crédito</strong> del libro contable (Excel)</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -280,15 +307,21 @@ col1, col2 = st.columns(2)
 with col1:
     st.markdown('<div class="upload-section">', unsafe_allow_html=True)
     st.markdown('<p class="section-title">📄 Extracto Bancario (CSV o Excel)</p>', unsafe_allow_html=True)
-    st.caption("Columna I · valores numéricos del extracto · acepta CSV, TXT o Excel")
-    archivo_csv = st.file_uploader("Subir extracto", type=["csv", "txt", "xlsx", "xls"], key="csv", label_visibility="collapsed")
+    st.caption("Columna I · valores del extracto · acepta CSV, TXT o Excel")
+    archivo_csv = st.file_uploader(
+        "Subir extracto", type=["csv", "txt", "xlsx", "xls"],
+        key="csv", label_visibility="collapsed"
+    )
     st.markdown('</div>', unsafe_allow_html=True)
 
 with col2:
     st.markdown('<div class="upload-section">', unsafe_allow_html=True)
     st.markdown('<p class="section-title">📊 Libro Contable (Excel)</p>', unsafe_allow_html=True)
-    st.caption("Columnas: Crédito · Saldo Movimiento")
-    archivo_xlsx = st.file_uploader("Subir Excel", type=["xlsx", "xls"], key="xlsx", label_visibility="collapsed")
+    st.caption("Columnas: Débito · Crédito · Nombre del tercero")
+    archivo_xlsx = st.file_uploader(
+        "Subir Excel", type=["xlsx", "xls"],
+        key="xlsx", label_visibility="collapsed"
+    )
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ── Opciones avanzadas ───────────────────────────────────────────────────────
@@ -300,7 +333,7 @@ with st.expander("⚙️ Opciones avanzadas"):
         value=0.01,
         step=0.01,
         format="%.2f",
-        help="Útil para diferencias por redondeo. Por defecto 0.01"
+        help="Útil para diferencias por redondeo. Por defecto 0.01",
     )
 
 # ── Procesamiento ────────────────────────────────────────────────────────────
@@ -314,74 +347,106 @@ if archivo_csv and archivo_xlsx:
 
     df_excel, col_debito, col_credito, col_tercero = resultado_excel
 
-    df_resultado = comparar(serie_csv, desc_csv, df_excel, col_debito, col_credito, col_tercero, tolerancia)
+    df_resultado = comparar(
+        serie_csv, desc_csv,
+        df_excel, col_debito, col_credito, col_tercero,
+        tolerancia,
+    )
 
     # ── Métricas ─────────────────────────────────────────────────────────────
-    total        = len(df_resultado)
-    encontrados  = df_resultado["Estado"].str.contains("CORRECTO").sum()
-    no_encontrados = total - encontrados
-    pct          = round(encontrados / total * 100, 1) if total > 0 else 0
+    total            = len(df_resultado)
+    en_debito        = df_resultado["Estado"].str.contains("Débito").sum()
+    en_credito       = df_resultado["Estado"].str.contains("Crédito").sum()
+    en_ambos         = df_resultado["Estado"].str.contains("Débito y Crédito").sum()
+    no_encontrados   = (df_resultado["Estado"] == "❌ No encontrado").sum()
+    encontrados_tot  = total - no_encontrados
+    pct              = round(encontrados_tot / total * 100, 1) if total > 0 else 0
 
     st.markdown("---")
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
 
     with m1:
         st.markdown(f"""
         <div class="metric-card">
             <div class="number blue">{total}</div>
-            <div class="label">Valores CSV analizados</div>
+            <div class="label">Valores analizados</div>
         </div>""", unsafe_allow_html=True)
     with m2:
         st.markdown(f"""
         <div class="metric-card">
-            <div class="number green">{encontrados}</div>
-            <div class="label">Encontrados en Excel</div>
+            <div class="number green">{en_debito}</div>
+            <div class="label">Encontrados en Débito</div>
         </div>""", unsafe_allow_html=True)
     with m3:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="number orange">{en_credito}</div>
+            <div class="label">Encontrados en Crédito</div>
+        </div>""", unsafe_allow_html=True)
+    with m4:
         st.markdown(f"""
         <div class="metric-card">
             <div class="number red">{no_encontrados}</div>
             <div class="label">No encontrados</div>
         </div>""", unsafe_allow_html=True)
-    with m4:
+    with m5:
         color = "green" if pct == 100 else ("orange" if pct >= 80 else "red")
         st.markdown(f"""
         <div class="metric-card">
             <div class="number {color}">{pct}%</div>
-            <div class="label">Coincidencia</div>
+            <div class="label">Coincidencia total</div>
         </div>""", unsafe_allow_html=True)
 
     # ── Tabla resultado ───────────────────────────────────────────────────────
     st.markdown('<div class="result-block">', unsafe_allow_html=True)
     st.markdown('<p class="section-title">📋 Resultado detallado</p>', unsafe_allow_html=True)
 
-    # Filtro
     filtro = st.radio(
         "Mostrar:",
-        ["Todos", "Solo NO ENCONTRADOS", "Solo ✅ CORRECTOS"],
+        [
+            "Todos",
+            "❌ No encontrados",
+            "✅ En Débito",
+            "✅ En Crédito",
+            "✅ En Débito y Crédito",
+        ],
         horizontal=True,
     )
 
     df_mostrar = df_resultado.copy()
-    if filtro == "Solo NO ENCONTRADOS":
-        df_mostrar = df_mostrar[df_mostrar["Estado"] == "❌ NO ENCONTRADO"]
-    elif filtro == "Solo ✅ CORRECTOS":
-        df_mostrar = df_mostrar[df_mostrar["Estado"] == "✅ CORRECTO"]
+    if filtro == "❌ No encontrados":
+        df_mostrar = df_mostrar[df_mostrar["Estado"] == "❌ No encontrado"]
+    elif filtro == "✅ En Débito":
+        df_mostrar = df_mostrar[df_mostrar["Estado"] == "✅ En Débito"]
+    elif filtro == "✅ En Crédito":
+        df_mostrar = df_mostrar[df_mostrar["Estado"] == "✅ En Crédito"]
+    elif filtro == "✅ En Débito y Crédito":
+        df_mostrar = df_mostrar[df_mostrar["Estado"] == "✅ En Débito y Crédito"]
 
-    # Colorear por estado
     def colorear_fila(row):
         estado = str(row["Estado"])
-        if "CORRECTO" in estado:
-            return ["background-color: #F0FFF4"] * len(row)
-        else:
+        if "No encontrado" in estado:
             return ["background-color: #FFF5F5"] * len(row)
+        elif "Débito y Crédito" in estado:
+            return ["background-color: #EEF4FF"] * len(row)
+        elif "Débito" in estado:
+            return ["background-color: #F0FFF4"] * len(row)
+        elif "Crédito" in estado:
+            return ["background-color: #FFFBF0"] * len(row)
+        return [""] * len(row)
 
     st.dataframe(
         df_mostrar.style.apply(colorear_fila, axis=1),
         use_container_width=True,
-        height=420,
+        height=440,
     )
     st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Leyenda de colores ────────────────────────────────────────────────────
+    st.caption(
+        "🟢 Verde = encontrado en Débito · 🟡 Amarillo = encontrado en Crédito · "
+        "🔵 Azul = encontrado en ambas · 🔴 Rojo = no encontrado"
+    )
 
     # ── Exportar ──────────────────────────────────────────────────────────────
     st.markdown("---")
@@ -408,19 +473,21 @@ if archivo_csv and archivo_xlsx:
 
     # ── Vista previa de archivos fuente ──────────────────────────────────────
     with st.expander("🔎 Vista previa de archivos cargados"):
-        t1, t2 = st.tabs(["CSV — Columna I", "Excel — Débito & Crédito"])
+        t1, t2 = st.tabs(["CSV — Valores analizados", "Excel — Débito & Crédito"])
         with t1:
-            st.dataframe(serie_csv.rename("Valor (Col I)"), use_container_width=True, height=300)
+            prev_csv = pd.DataFrame(
+                {"Descripción (Col G)": desc_csv, "Valor (Col I)": serie_csv}
+            )
+            st.dataframe(prev_csv, use_container_width=True, height=300)
         with t2:
             cols_preview = [c for c in [col_tercero, col_debito, col_credito] if c]
             st.dataframe(df_excel[cols_preview], use_container_width=True, height=300)
 
 else:
-    # Estado vacío
     st.markdown("""
     <div style="text-align:center; padding: 60px 20px; color: #999;">
         <div style="font-size: 3rem; margin-bottom: 16px;">📂</div>
         <p style="font-size: 1.1rem; font-weight: 600;">Carga los dos archivos para iniciar la comparativa</p>
-        <p style="font-size: .9rem;">CSV con la columna I · Excel con Crédito y Saldo Movimiento</p>
+        <p style="font-size: .9rem;">CSV con la columna I · Excel con Débito, Crédito y Nombre del tercero</p>
     </div>
     """, unsafe_allow_html=True)
