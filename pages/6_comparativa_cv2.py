@@ -3,8 +3,9 @@ import pandas as pd
 import io
 import base64
 import json
-import requests
 from datetime import datetime
+from openai import OpenAI
+import fitz  # PyMuPDF
 
 if not st.session_state.get("authentication_status"):
     st.warning("⚠️ Debe iniciar sesión primero.")
@@ -102,11 +103,12 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ── Constantes ───────────────────────────────────────────────────────────────
-ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-CLAUDE_MODEL      = "claude-sonnet-4-20250514"
+# ── Configuración del modelo ─────────────────────────────────────────────────
+openai_api_key = st.secrets["settings"]["key"]
 
-PROMPT_OCR_PDF = """Eres un extractor contable experto. Se te entrega el PDF de un extracto bancario de Bancolombia.
+OPENAI_MODEL = "gpt-4o"
+
+PROMPT_OCR_PDF = """Eres un extractor contable experto. Se te entrega una o varias imágenes de páginas de un extracto bancario de Bancolombia.
 
 Tu tarea es extraer TODAS las transacciones reales (movimientos de dinero) y devolverlas como JSON.
 
@@ -120,84 +122,66 @@ REGLAS ESTRICTAS:
 Devuelve ÚNICAMENTE un JSON válido con este formato, sin texto adicional, sin bloques markdown:
 [
   {"descripcion": "PAGO A PROV wework colombia sa", "valor": -24257870.00},
-  {"descripcion": "ABONO INTERESES AHORROS", "valor": 8161.21},
-  ...
+  {"descripcion": "ABONO INTERESES AHORROS", "valor": 8161.21}
 ]"""
 
 
-# ── Funciones PDF OCR ────────────────────────────────────────────────────────
+# ── Funciones PDF OCR con OpenAI ─────────────────────────────────────────────
 
-def pdf_a_base64(archivo) -> str:
-    """Lee el archivo PDF subido y lo convierte a base64."""
+def pdf_a_imagenes_b64(archivo) -> list[str]:
+    """
+    Convierte cada página del PDF a PNG en base64 usando PyMuPDF.
+    Devuelve lista de strings base64, una por página.
+    """
     contenido = archivo.read()
     archivo.seek(0)
-    return base64.standard_b64encode(contenido).decode("utf-8")
+    doc = fitz.open(stream=contenido, filetype="pdf")
+    imagenes = []
+    for pagina in doc:
+        # 2x de resolución para que el texto sea legible por GPT-4o
+        mat = fitz.Matrix(2.0, 2.0)
+        pix = pagina.get_pixmap(matrix=mat)
+        png_bytes = pix.tobytes("png")
+        imagenes.append(base64.b64encode(png_bytes).decode("utf-8"))
+    doc.close()
+    return imagenes
 
 
-def extraer_transacciones_pdf(
-    archivo, api_key: str
-) -> tuple[pd.Series, pd.Series]:
+def extraer_transacciones_pdf(archivo) -> tuple:
     """
-    Envía el PDF a Claude API para OCR y extracción de transacciones.
+    Convierte el PDF a imágenes y las envía a GPT-4o para OCR y extracción.
     Devuelve (serie_valores, serie_descripciones) igual que cargar_extracto().
     """
-    api_key_real = api_key.strip()
-    if not api_key_real:
-        st.error("❌ Ingresa tu API Key de Anthropic para procesar PDFs.")
-        return None, None
+    client = OpenAI(api_key=openai_api_key)
 
-    pdf_b64 = pdf_a_base64(archivo)
+    imagenes_b64 = pdf_a_imagenes_b64(archivo)
+    n_paginas = len(imagenes_b64)
 
-    payload = {
-        "model": CLAUDE_MODEL,
-        "max_tokens": 8192,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "document",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "application/pdf",
-                            "data": pdf_b64,
-                        },
-                    },
-                    {
-                        "type": "text",
-                        "text": PROMPT_OCR_PDF,
-                    },
-                ],
-            }
-        ],
-    }
-
-    headers = {
-        "Content-Type": "application/json",
-        "x-api-key": api_key_real,
-        "anthropic-version": "2023-06-01",
-        "anthropic-beta": "pdfs-2024-09-25",
-    }
+    # Construir content: primero el prompt, luego una imagen por página
+    content = [{"type": "text", "text": PROMPT_OCR_PDF}]
+    for i, img_b64 in enumerate(imagenes_b64):
+        content.append({
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/png;base64,{img_b64}",
+                "detail": "high",
+            },
+        })
 
     try:
-        resp = requests.post(
-            ANTHROPIC_API_URL, headers=headers, json=payload, timeout=120
+        respuesta = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[{"role": "user", "content": content}],
+            max_tokens=8192,
+            temperature=0,
         )
-        resp.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        st.error(f"❌ Error al llamar la API de Anthropic: {e}")
+    except Exception as e:
+        st.error(f"❌ Error al llamar la API de OpenAI: {e}")
         return None, None
 
-    data = resp.json()
+    texto = respuesta.choices[0].message.content or ""
 
-    # Extraer texto de la respuesta
-    texto = ""
-    for bloque in data.get("content", []):
-        if bloque.get("type") == "text":
-            texto = bloque["text"]
-            break
-
-    # Limpiar posibles bloques markdown que el modelo pueda poner
+    # Limpiar posibles bloques markdown
     texto_limpio = texto.strip()
     if texto_limpio.startswith("```"):
         lineas = texto_limpio.split("\n")
@@ -208,16 +192,16 @@ def extraer_transacciones_pdf(
     try:
         transacciones = json.loads(texto_limpio)
     except json.JSONDecodeError as e:
-        st.error(f"❌ No se pudo parsear el JSON devuelto por Claude: {e}")
+        st.error(f"❌ No se pudo parsear el JSON devuelto por GPT-4o: {e}")
         with st.expander("Ver respuesta raw"):
-            st.code(texto[:2000])
+            st.code(texto[:3000])
         return None, None
 
     if not transacciones:
-        st.warning("⚠️ Claude no encontró transacciones en el PDF.")
+        st.warning("⚠️ GPT-4o no encontró transacciones en el PDF.")
         return None, None
 
-    valores      = pd.Series([float(t["valor"])       for t in transacciones])
+    valores       = pd.Series([float(t["valor"])      for t in transacciones])
     descripciones = pd.Series([str(t["descripcion"])  for t in transacciones])
 
     return valores, descripciones
@@ -260,9 +244,9 @@ def cargar_extracto(archivo) -> tuple:
         )
         return None, None
 
-    desc_raw = df[6].fillna("").astype(str).str.strip().str.upper()
+    desc_raw   = df[6].fillna("").astype(str).str.strip().str.upper()
     mask_saldo = desc_raw.str.startswith("SALDO")
-    df = df[~mask_saldo].copy()
+    df         = df[~mask_saldo].copy()
 
     col_i    = pd.to_numeric(df[8], errors="coerce").dropna()
     desc_col = df[6].fillna("").astype(str).str.strip()
@@ -313,7 +297,7 @@ def cargar_excel(archivo) -> tuple:
     if col_tercero:
         cols.append(col_tercero)
 
-    resultado = df[cols].copy()
+    resultado          = df[cols].copy()
     resultado[col_debito]  = pd.to_numeric(resultado[col_debito],  errors="coerce")
     resultado[col_credito] = pd.to_numeric(resultado[col_credito], errors="coerce")
     resultado = resultado.dropna(subset=[col_debito, col_credito], how="all")
@@ -332,7 +316,7 @@ def comparar(
 ) -> pd.DataFrame:
     """
     Para CADA valor del extracto (en valor absoluto) busca coincidencia
-    en la columna Débito Y en la columna Crédito del Excel.
+    en Débito Y Crédito del libro contable.
     """
     def build_map(col_name):
         m = {}
@@ -352,7 +336,6 @@ def comparar(
 
     map_debito  = build_map(col_debito)
     map_credito = build_map(col_credito)
-
     set_debito  = set(map_debito.keys())
     set_credito = set(map_credito.keys())
 
@@ -382,14 +365,12 @@ def comparar(
         else:
             estado = "❌ No encontrado"
 
-        nombre_tercero = nombre_d or nombre_c
-
         filas.append({
             "Valor Extracto":       val_r,
             "Descripción Extracto": desc,
             f"En {col_debito}":     "✅" if en_debito  else "❌",
             f"En {col_credito}":    "✅" if en_credito else "❌",
-            "Nombre del tercero":   nombre_tercero,
+            "Nombre del tercero":   nombre_d or nombre_c,
             "Estado":               estado,
         })
 
@@ -410,14 +391,14 @@ st.markdown("""
     <h1>🔍 Comparativa Contable</h1>
     <p>Verifica si los valores del extracto bancario están registrados en
     <strong>Débito</strong> o <strong>Crédito</strong> del libro contable.
-    Acepta CSV, Excel o <strong>PDF de Bancolombia</strong> (vía IA).</p>
+    Acepta CSV, Excel o <strong>PDF de Bancolombia</strong> (OCR con GPT-4o).</p>
 </div>
 """, unsafe_allow_html=True)
 
 # ── Selector de tipo de extracto ─────────────────────────────────────────────
 tipo_extracto = st.radio(
     "Tipo de archivo del extracto bancario:",
-    ["📄 CSV / Excel  (columnas fijas)", "🤖 PDF Bancolombia (OCR con IA)"],
+    ["📄 CSV / Excel  (columnas fijas)", "🤖 PDF Bancolombia (OCR con GPT-4o)"],
     horizontal=True,
     key="tipo_extracto",
 )
@@ -432,20 +413,11 @@ with col1:
     st.markdown('<div class="upload-section">', unsafe_allow_html=True)
     if es_pdf:
         st.markdown('<p class="section-title">📑 Extracto Bancario (PDF)</p>', unsafe_allow_html=True)
-        st.markdown('<span class="pdf-badge">🤖 OCR con Claude AI</span>', unsafe_allow_html=True)
+        st.markdown('<span class="pdf-badge">🤖 OCR con GPT-4o</span>', unsafe_allow_html=True)
         st.caption("Estado de cuenta o Informe consolidado Bancolombia en PDF")
         archivo_extracto = st.file_uploader(
             "Subir PDF", type=["pdf"],
             key="pdf_extracto", label_visibility="collapsed"
-        )
-
-        # API Key input
-        api_key = st.text_input(
-            "API Key de Anthropic",
-            type="password",
-            placeholder="sk-ant-...",
-            help="Necesaria para el OCR del PDF. No se almacena.",
-            key="api_key_input",
         )
     else:
         st.markdown('<p class="section-title">📄 Extracto Bancario (CSV o Excel)</p>', unsafe_allow_html=True)
@@ -454,7 +426,6 @@ with col1:
             "Subir extracto", type=["csv", "txt", "xlsx", "xls"],
             key="csv", label_visibility="collapsed"
         )
-        api_key = ""
     st.markdown('</div>', unsafe_allow_html=True)
 
 with col2:
@@ -471,11 +442,7 @@ with col2:
 with st.expander("⚙️ Opciones avanzadas"):
     tolerancia = st.number_input(
         "Tolerancia de comparación (diferencia máxima permitida)",
-        min_value=0.0,
-        max_value=100.0,
-        value=0.01,
-        step=0.01,
-        format="%.2f",
+        min_value=0.0, max_value=100.0, value=0.01, step=0.01, format="%.2f",
         help="Útil para diferencias por redondeo. Por defecto 0.01",
     )
 
@@ -483,11 +450,10 @@ with st.expander("⚙️ Opciones avanzadas"):
 if archivo_extracto and archivo_xlsx:
     with st.spinner("Procesando archivos..."):
 
-        # --- Cargar extracto (CSV/Excel o PDF) ---
         if es_pdf:
-            with st.status("🤖 Extrayendo transacciones del PDF con Claude AI...", expanded=True) as status:
-                st.write("Enviando PDF a la API de Anthropic…")
-                serie_csv, desc_csv = extraer_transacciones_pdf(archivo_extracto, api_key)
+            with st.status("🤖 Extrayendo transacciones del PDF con GPT-4o...", expanded=True) as status:
+                st.write("Convirtiendo páginas del PDF a imágenes…")
+                serie_csv, desc_csv = extraer_transacciones_pdf(archivo_extracto)
                 if serie_csv is not None:
                     st.write(f"✅ {len(serie_csv)} transacciones extraídas correctamente.")
                     status.update(label="✅ PDF procesado", state="complete")
@@ -496,7 +462,6 @@ if archivo_extracto and archivo_xlsx:
         else:
             serie_csv, desc_csv = cargar_extracto(archivo_extracto)
 
-        # --- Cargar libro contable ---
         resultado_excel = cargar_excel(archivo_xlsx)
 
     if serie_csv is None or resultado_excel is None:
@@ -520,8 +485,7 @@ if archivo_extracto and archivo_xlsx:
 
     if es_pdf:
         st.info(
-            f"📑 PDF procesado: **{len(serie_csv)} transacciones** extraídas "
-            f"({'cargos y abonos'})",
+            f"📑 PDF procesado: **{len(serie_csv)} transacciones** extraídas con GPT-4o",
             icon="🤖",
         )
 
@@ -549,7 +513,7 @@ if archivo_extracto and archivo_xlsx:
     with m4:
         st.markdown(f"""
         <div class="metric-card">
-                <div class="number red">{no_encontrados}</div>
+            <div class="number red">{no_encontrados}</div>
             <div class="label">No encontrados</div>
         </div>""", unsafe_allow_html=True)
     with m5:
@@ -566,13 +530,7 @@ if archivo_extracto and archivo_xlsx:
 
     filtro = st.radio(
         "Mostrar:",
-        [
-            "Todos",
-            "❌ No encontrados",
-            "✅ En Débito",
-            "✅ En Crédito",
-            "✅ En Débito y Crédito",
-        ],
+        ["Todos", "❌ No encontrados", "✅ En Débito", "✅ En Crédito", "✅ En Débito y Crédito"],
         horizontal=True,
     )
 
@@ -637,20 +595,21 @@ if archivo_extracto and archivo_xlsx:
     with st.expander("🔎 Vista previa de archivos cargados"):
         t1, t2 = st.tabs(["Extracto — Valores analizados", "Excel — Débito & Crédito"])
         with t1:
-            label_col1 = "Descripción (PDF OCR)" if es_pdf else "Descripción (Col G)"
-            label_col2 = "Valor (PDF OCR)"        if es_pdf else "Valor (Col I)"
-            prev_csv = pd.DataFrame({label_col1: desc_csv, label_col2: serie_csv})
-            st.dataframe(prev_csv, use_container_width=True, height=300)
+            label1 = "Descripción (GPT-4o OCR)" if es_pdf else "Descripción (Col G)"
+            label2 = "Valor (GPT-4o OCR)"        if es_pdf else "Valor (Col I)"
+            st.dataframe(
+                pd.DataFrame({label1: desc_csv, label2: serie_csv}),
+                use_container_width=True, height=300,
+            )
         with t2:
             cols_preview = [c for c in [col_tercero, col_debito, col_credito] if c]
             st.dataframe(df_excel[cols_preview], use_container_width=True, height=300)
 
 else:
-    modo = "PDF de Bancolombia o " if es_pdf else ""
-    st.markdown(f"""
+    st.markdown("""
     <div style="text-align:center; padding: 60px 20px; color: #999;">
         <div style="font-size: 3rem; margin-bottom: 16px;">📂</div>
         <p style="font-size: 1.1rem; font-weight: 600;">Carga los dos archivos para iniciar la comparativa</p>
-        <p style="font-size: .9rem;">{modo}CSV/Excel con los valores del extracto · Excel con Débito, Crédito y Nombre del tercero</p>
+        <p style="font-size: .9rem;">CSV / Excel o PDF del extracto bancario · Excel con Débito, Crédito y Nombre del tercero</p>
     </div>
     """, unsafe_allow_html=True)
