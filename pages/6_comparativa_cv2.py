@@ -404,6 +404,12 @@ tipo_extracto = st.radio(
 )
 es_pdf = tipo_extracto.startswith("🤖")
 
+# Limpiar cache si el usuario cambia de modo
+if not es_pdf:
+    st.session_state.pop("ocr_series",    None)
+    st.session_state.pop("ocr_desc",      None)
+    st.session_state.pop("ocr_cache_key", None)
+
 st.markdown("---")
 
 # ── Carga de archivos ────────────────────────────────────────────────────────
@@ -448,20 +454,43 @@ with st.expander("⚙️ Opciones avanzadas"):
 
 # ── Procesamiento ────────────────────────────────────────────────────────────
 if archivo_extracto and archivo_xlsx:
-    with st.spinner("Procesando archivos..."):
 
-        if es_pdf:
+    # Clave única basada en nombre + tamaño del archivo PDF
+    # Si el archivo no cambia, no se vuelve a llamar la API de OpenAI
+    ocr_cache_key = (
+        f"{archivo_extracto.name}_{archivo_extracto.size}"
+        if es_pdf else None
+    )
+
+    if es_pdf:
+        # ¿Ya tenemos el resultado cacheado para este archivo?
+        cache_actual = st.session_state.get("ocr_cache_key")
+        if cache_actual != ocr_cache_key or "ocr_series" not in st.session_state:
             with st.status("🤖 Extrayendo transacciones del PDF con GPT-4o...", expanded=True) as status:
                 st.write("Convirtiendo páginas del PDF a imágenes…")
                 serie_csv, desc_csv = extraer_transacciones_pdf(archivo_extracto)
                 if serie_csv is not None:
+                    # Guardar en session_state para reutilizar en re-ejecuciones
+                    st.session_state["ocr_series"]    = serie_csv
+                    st.session_state["ocr_desc"]      = desc_csv
+                    st.session_state["ocr_cache_key"] = ocr_cache_key
                     st.write(f"✅ {len(serie_csv)} transacciones extraídas correctamente.")
                     status.update(label="✅ PDF procesado", state="complete")
                 else:
                     status.update(label="❌ Error procesando PDF", state="error")
         else:
+            # Reutilizar resultado cacheado sin llamar la API
+            serie_csv = st.session_state["ocr_series"]
+            desc_csv  = st.session_state["ocr_desc"]
+    else:
+        # Para CSV/Excel limpiar cache si existía
+        st.session_state.pop("ocr_series",    None)
+        st.session_state.pop("ocr_desc",      None)
+        st.session_state.pop("ocr_cache_key", None)
+        with st.spinner("Leyendo extracto…"):
             serie_csv, desc_csv = cargar_extracto(archivo_extracto)
 
+    with st.spinner("Leyendo libro contable…"):
         resultado_excel = cargar_excel(archivo_xlsx)
 
     if serie_csv is None or resultado_excel is None:
