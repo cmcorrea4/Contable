@@ -12,6 +12,9 @@ if not st.session_state.get("authentication_status"):
 
 st.set_page_config(page_title="Traslado Nómina", page_icon="📋", layout="wide")
 
+# Cambia al editar la lógica: invalida resultados viejos guardados en memoria.
+APP_VERSION = "v3-valores-2025"
+
 st.markdown("""
 <style>
     .stApp { background-color: #F5F7FA; }
@@ -793,11 +796,21 @@ if f33 and f32:
             "warns":    warns,
             "hoja":     hoja_32,
             "modo":     modo,
+            "version":  APP_VERSION,
             "nombre":   f"3_2_actualizado_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
         }
 
     # ── Resultado (persistente entre re-runs) ─────────────────────────────────
     res = st.session_state.get("traslado_resultado")
+
+    # Si el resultado guardado quedó de una versión o un modo distintos al actual,
+    # no lo mostramos: hay que volver a pulsar "Ejecutar" para regenerarlo.
+    if res and (res.get("version") != APP_VERSION or res.get("modo") != modo):
+        st.info("ℹ️ Cambió la configuración (modo o versión de la app). Pulsa "
+                "**🚀 Ejecutar traslado** de nuevo para regenerar el archivo con "
+                "los valores actualizados.")
+        res = None
+
     if res:
         if res["warns"]:
             with st.expander(f"⚠️ {len(res['warns'])} advertencias"):
@@ -847,4 +860,3 @@ else:
             &nbsp;·&nbsp; 3.2 → hoja <b>NÓMINA</b>
         </p>
     </div>""", unsafe_allow_html=True)
-
