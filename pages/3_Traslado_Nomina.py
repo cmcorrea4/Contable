@@ -68,13 +68,54 @@ st.markdown("""
         background: #FFF8E1; border-left: 4px solid #E07B20;
         border-radius: 8px; padding: 12px 16px; margin: 10px 0; font-size: .88rem;
     }
+    .info-box {
+        background: #E8F4FD; border-left: 4px solid #2E6DA4;
+        border-radius: 8px; padding: 12px 16px; margin: 10px 0; font-size: .88rem;
+    }
     #MainMenu, footer, header { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UTILIDADES
+# CONFIGURACIÓN DE FÓRMULAS DEL DESTINO (hoja NÓMINA del 3.2)
+# ─────────────────────────────────────────────────────────────────────────────
+# La plantilla 3.2 trae estas fórmulas pre-llenadas SOLO hasta ~fila 828.
+# Para que TODAS las filas escritas calculen (en especial Vr DÉBITO y Vr CRÉDITO),
+# se reescriben fila a fila usando estas plantillas. Además se corrigen los
+# #REF! preexistentes de las columnas P (CONTRAPARTIDA) y T (ID TERCERO).
+#
+# Índices de columna (1-based) según el layout estándar de la hoja NÓMINA:
+#   A=1 GRUPO · B=2 COD_DINA · C=3 CONCEPTO · D=4 COD_HELISA · E=5 CEDULA
+#   F=6 NOMBRE · G=7 HORAS · H=8 VALOR · I=9 NETO · J=10 CC · K=11 NOMBRE CC
+#   L=12 CUENTA PUC · M=13 NAT · N=14 Vr DEBITO · O=15 Vr CREDITO
+#   P=16 CONTRAPARTIDA · Q=17 NAT · R=18 Vr DEBITO · S=19 Vr CREDITO
+#   T=20 ID TERCERO · U=21 NOMBRE TERCERO
+_HOM = "'HOMOLOGACION CONCEPTOS'"
+
+def formulas_fila(r):
+    """Devuelve {indice_columna: formula} para la fila r."""
+    return {
+        1:  f"=+VLOOKUP(D{r},{_HOM}!$B$1:$I$81,8,FALSE)",                                       # A GRUPO
+        9:  f'=+IF(MID(B{r},1,1)="3",-H{r},H{r})',                                              # I NETO
+        10: f"=+VLOOKUP(E{r},CC!$B:$C,2,FALSE)",                                                # J CC
+        11: f"=+J{r}",                                                                          # K NOMBRE CC
+        12: f'=+IF(MID(J{r},1,2)="12",VLOOKUP(D{r},{_HOM}!$B$1:$E$1037,4,0),'
+            f'VLOOKUP(D{r},{_HOM}!$B$1:$E$1037,3,0))',                                          # L CUENTA PUC
+        13: f'=+IF(VLOOKUP(D{r},{_HOM}!$B$1:$G$1148,5,0)="D",'
+            f'IF(H{r}<0,"C",VLOOKUP(D{r},{_HOM}!$B$1:$G$1148,5,0)),"C")',                       # M NAT
+        14: f'=+IF(M{r}="D",ABS(I{r}),0)',                                                      # N Vr DEBITO
+        15: f'=+IF(M{r}="C",ABS(I{r}),0)',                                                      # O Vr CREDITO
+        16: f"=+VLOOKUP(D{r},{_HOM}!$B$1:$G$1148,6,0)",                                         # P CONTRAPARTIDA (corrige #REF!)
+        17: f'=+IF(M{r}="C","D","C")',                                                          # Q NAT
+        18: f"=+O{r}",                                                                          # R Vr DEBITO
+        19: f"=+N{r}",                                                                          # S Vr CREDITO
+        20: f'=+IF(A{r}="PAGO_SS",VLOOKUP(U{r},\'TERCEROS PILA\'!$A$1:$E$35,3,0),E{r})',        # T ID TERCERO (corrige #REF!)
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UTILIDADES DE LECTURA
 # ─────────────────────────────────────────────────────────────────────────────
 
 def detectar_fila_header(ws):
@@ -242,20 +283,32 @@ def build_col_idx(ws, hr):
     return col_idx
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# TRASLADO (CON CORRECCIONES)
+# ─────────────────────────────────────────────────────────────────────────────
+
 def ejecutar_traslado_doble(
     raw_32, hoja_32, hr_32,
-    df_datos, mapa_src_datos, mapa_dst_datos, n_filas_bloque1,
+    df_datos, mapa_src_datos, mapa_dst_datos,
     df_resumen, mapa_src_resumen, mapa_dst_resumen,
-    col_deteccion_sn
+    col_deteccion_sn,
+    extender_formulas=True,
 ):
+    """
+    Bloque 1: hoja DATOS -> filas del 3.2 (TODAS las filas, sin tope).
+    Bloque 2: hoja Nomina resumen -> filas con COD_DINA == 'SN'.
+    extender_formulas: reescribe A,I,J,K,L,M,N,O,P,Q,R,S,T en cada fila escrita
+                       para que Vr DÉBITO / Vr CRÉDITO calculen en todas las
+                       filas y se corrijan los #REF! de P y T.
+    """
     wb = openpyxl.load_workbook(io.BytesIO(raw_32))
     ws = wb[hoja_32]
     col_idx = build_col_idx(ws, hr_32)
     warns   = []
 
-    # ── BLOQUE 1: hoja DATOS fila a fila ─────────────────────────────────────
+    # ── BLOQUE 1: hoja DATOS fila a fila (TODAS las filas) ───────────────────
     primera_dato = hr_32 + 1
-    df_d = df_datos.iloc[:n_filas_bloque1].reset_index(drop=True)
+    df_d = df_datos.reset_index(drop=True)          # ← ya NO se trunca a n_32
     n_ok = 0
 
     for i, row in df_d.iterrows():
@@ -276,29 +329,32 @@ def ejecutar_traslado_doble(
             ws.cell(fila_excel, cn, value=val)
         n_ok += 1
 
-    # ── BLOQUE 2: filas SN — hoja Nomina resumen ──────────────────────────────
+    ultima_dato = primera_dato + len(df_d) - 1
+
+    # ── BLOQUE 2: filas SN — hoja Nomina resumen ─────────────────────────────
+    n_sn_escritas = 0
     if df_resumen is not None and len(df_resumen) > 0:
         cn_dina = col_idx.get(col_deteccion_sn)
 
-        # Recopilar filas excel donde COD_DINA == "SN"
         filas_sn = []
-        for r in range(hr_32 + 1, ws.max_row + 1):
-            val_dina = ws.cell(r, cn_dina).value if cn_dina else None
-            if val_dina is not None and str(val_dina).strip().upper() == "SN":
-                filas_sn.append(r)
-                
-        # Filtrar filas de df_resumen que son encabezados (por ej. contienen "ID", "NOMBRECOMPLETO")
+        if cn_dina:
+            for r in range(hr_32 + 1, ws.max_row + 1):
+                val_dina = ws.cell(r, cn_dina).value
+                if val_dina is not None and str(val_dina).strip().upper() == "SN":
+                    filas_sn.append(r)
+
         filas_validas = []
         for _, row in df_resumen.iterrows():
             row_str = " ".join(str(v).upper() for v in row.values)
             if "NOMBRECOMPLETO" in row_str or "CEDULA" in row_str or "SALARIO NETO" in row_str:
                 continue
             filas_validas.append(row)
-            
-        df_resumen_limpio = pd.DataFrame(filas_validas) if filas_validas else pd.DataFrame(columns=df_resumen.columns)
+
+        df_resumen_limpio = (pd.DataFrame(filas_validas)
+                             if filas_validas
+                             else pd.DataFrame(columns=df_resumen.columns))
 
         n_sn = min(len(df_resumen_limpio), len(filas_sn))
-
         for i in range(n_sn):
             fila_excel = filas_sn[i]
             row = df_resumen_limpio.iloc[i]
@@ -316,16 +372,30 @@ def ejecutar_traslado_doble(
                 if isinstance(val, float) and pd.isna(val):
                     val = None
                 ws.cell(fila_excel, cn, value=val)
+            n_sn_escritas += 1
 
-        if len(df_resumen) > len(filas_sn):
+        if len(df_resumen_limpio) > len(filas_sn):
             warns.append(
-                f"Nomina resumen tiene {len(df_resumen)} filas "
+                f"Nomina resumen tiene {len(df_resumen_limpio)} filas válidas "
                 f"pero solo hay {len(filas_sn)} filas SN en el 3.2."
             )
 
+    # ── EXTENSIÓN DE FÓRMULAS (Vr DÉBITO / Vr CRÉDITO y dependencias) ─────────
+    if extender_formulas and ultima_dato >= primera_dato:
+        for fe in range(primera_dato, ultima_dato + 1):
+            for c, f in formulas_fila(fe).items():
+                ws.cell(fe, c, value=f)
+
+        # Limpiar fórmulas residuales de la plantilla por debajo de la última
+        # fila de datos (la plantilla traía fórmulas hasta ~fila 828).
+        for fe in range(ultima_dato + 1, ws.max_row + 1):
+            for c in formulas_fila(fe):
+                if ws.cell(fe, c).value is not None:
+                    ws.cell(fe, c, value=None)
+
     buf = io.BytesIO()
     wb.save(buf)
-    return buf.getvalue(), n_ok, warns
+    return buf.getvalue(), n_ok, n_sn_escritas, ultima_dato, warns
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -336,13 +406,13 @@ st.markdown("""
 <div class="header-block">
     <h1>📋 Traslado de Nómina — 3.3 → 3.2</h1>
     <p>
-        <b>Bloque 1:</b> hoja DATOS → primeras filas del 3.2
+        <b>Bloque 1:</b> hoja DATOS → todas las filas del 3.2
         &nbsp;|&nbsp;
         <b>Bloque 2:</b> hoja Nomina resumen → filas SN del 3.2
+        &nbsp;|&nbsp;
+        <b>Fórmulas:</b> Vr Débito / Vr Crédito extendidas a todas las filas
     </p>
 </div>""", unsafe_allow_html=True)
-
-
 
 st.markdown("---")
 
@@ -359,7 +429,7 @@ with col1:
 with col2:
     st.markdown('<div class="upload-section"><p class="section-title">📊 Archivo 3.2 — Destino (hoja NÓMINA)</p>',
                 unsafe_allow_html=True)
-    st.caption("Bloque 1: primeras filas · Bloque 2: filas con COD_DINA = SN")
+    st.caption("Bloque 1: todas las filas · Bloque 2: filas con COD_DINA = SN")
     f32 = st.file_uploader("32", type=["xlsx", "xls"], key="u32",
                            label_visibility="collapsed")
     st.markdown('</div>', unsafe_allow_html=True)
@@ -387,7 +457,7 @@ if f33 and f32:
             else:
                 st.warning("No se encontró la hoja 'Nomina resumen' en el archivo 3.3")
         with t3:
-            st.caption(f"Hoja: **{hoja_32}** | {len(df_32)} filas")
+            st.caption(f"Hoja: **{hoja_32}** | {len(df_32)} filas (fórmulas pre-llenadas)")
             st.dataframe(df_32.head(8), use_container_width=True)
 
     # ── Ajuste manual ─────────────────────────────────────────────────────────
@@ -453,6 +523,21 @@ if f33 and f32:
             m32["valor"]      = st.selectbox("VALOR",               op32,
                 index=idx(op32, m32["valor"]),      key="t_val")
 
+    # ── Opciones ──────────────────────────────────────────────────────────────
+    with st.expander("🧮 Opciones de fórmulas", expanded=True):
+        extender = st.checkbox(
+            "Extender fórmulas Vr Débito / Vr Crédito a todas las filas "
+            "(y corregir #REF! de CONTRAPARTIDA e ID TERCERO)",
+            value=True,
+        )
+        st.markdown(
+            '<div class="info-box">ℹ️ Las fórmulas se escriben como texto; '
+            '<b>Excel las recalcula automáticamente al abrir el archivo</b>. '
+            'Si necesitas los valores ya calculados sin abrir Excel, hay que '
+            'pasar el archivo por LibreOffice en el servidor.</div>',
+            unsafe_allow_html=True
+        )
+
     # ── Vista previa ──────────────────────────────────────────────────────────
     st.markdown("---")
     col_pv1, col_pv2 = st.columns(2)
@@ -514,20 +599,11 @@ if f33 and f32:
         st.markdown(f'<div class="metric-card"><div class="number blue">{n_res_33}</div>'
                     f'<div class="label">Filas Resumen (3.3)</div></div>', unsafe_allow_html=True)
     with c3:
-        st.markdown(f'<div class="metric-card"><div class="number blue">{n_32}</div>'
-                    f'<div class="label">Filas totales (3.2)</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="number green">{n_datos_33}</div>'
+                    f'<div class="label">Filas a escribir (3.2)</div></div>', unsafe_allow_html=True)
     with c4:
-        color_sn = "green" if n_sn_32 == n_res_33 else "orange"
-        st.markdown(f'<div class="metric-card"><div class="number {color_sn}">{n_sn_32}</div>'
-                    f'<div class="label">Filas SN en 3.2</div></div>', unsafe_allow_html=True)
-
-    if n_sn_32 != n_res_33 and n_res_33 > 0:
-        st.markdown(
-            f'<div class="warn-box">⚠️ Nomina resumen tiene <b>{n_res_33}</b> filas '
-            f'pero se encontraron <b>{n_sn_32}</b> filas SN en el 3.2. '
-            f'Se escribirán <b>{min(n_sn_32, n_res_33)}</b>.</div>',
-            unsafe_allow_html=True
-        )
+        st.markdown(f'<div class="metric-card"><div class="number blue">{n_32}</div>'
+                    f'<div class="label">Filas plantilla (3.2)</div></div>', unsafe_allow_html=True)
 
     # ── Ejecutar ──────────────────────────────────────────────────────────────
     st.markdown("---")
@@ -566,12 +642,13 @@ if f33 and f32:
             "valor":      m32["valor"],
         }
 
-        with st.spinner("Procesando los dos bloques..."):
-            resultado, n_ok, warns = ejecutar_traslado_doble(
+        with st.spinner("Procesando los dos bloques y extendiendo fórmulas..."):
+            resultado, n_ok, n_sn, ultima, warns = ejecutar_traslado_doble(
                 raw_32, hoja_32, hr_32,
-                df_datos, mapa_src_datos, mapa_dst_datos, n_32,
+                df_datos, mapa_src_datos, mapa_dst_datos,
                 df_resumen, mapa_src_resumen, mapa_dst_resumen,
-                m32["cod_dina"]
+                m32["cod_dina"],
+                extender_formulas=extender,
             )
 
         if warns:
@@ -579,10 +656,15 @@ if f33 and f32:
                 for w in warns:
                     st.warning(w)
 
+        msg_formulas = (" · Fórmulas Vr Débito/Crédito extendidas hasta la fila "
+                        f"{ultima}") if extender else ""
         st.success(
             f"✅ Bloque 1: {n_ok} filas DATOS escritas · "
-            f"Bloque 2: filas SN actualizadas en **{hoja_32}**"
+            f"Bloque 2: {n_sn} filas SN actualizadas{msg_formulas} "
+            f"en **{hoja_32}**"
         )
+        st.info("📌 Abre el archivo en Excel: las fórmulas se recalcularán solas "
+                "al abrirlo.")
 
         nombre = f"3_2_actualizado_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
         st.download_button(
