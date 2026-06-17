@@ -129,14 +129,18 @@ def detectar_fila_header(ws):
     return 1
 
 
-def leer_hoja(archivo, hint_hoja):
-    archivo.seek(0)
-    raw = archivo.read()
-    wb  = openpyxl.load_workbook(io.BytesIO(raw), data_only=True)
-    hoja = next(
-        (s for s in wb.sheetnames if hint_hoja.lower() in s.lower()),
-        wb.sheetnames[0]
-    )
+def _parse_hoja(raw, hint_hoja, exacta=False):
+    """Parsea una hoja desde bytes. Si exacta=True y no existe, devuelve None."""
+    wb = openpyxl.load_workbook(io.BytesIO(raw), data_only=True)
+    if exacta:
+        hoja = next((s for s in wb.sheetnames if hint_hoja.lower() in s.lower()), None)
+        if hoja is None:
+            return None, None, None
+    else:
+        hoja = next(
+            (s for s in wb.sheetnames if hint_hoja.lower() in s.lower()),
+            wb.sheetnames[0]
+        )
     ws = wb[hoja]
     hr = detectar_fila_header(ws)
 
@@ -158,40 +162,23 @@ def leer_hoja(archivo, hint_hoja):
             rows.append(fila)
 
     df = pd.DataFrame(rows, columns=headers)
-    return df, hoja, hr, raw
+    return df, hoja, hr
 
 
-def leer_hoja_exacta(archivo, hint):
-    """Lee hoja cuyo nombre contenga hint. Devuelve None si no existe."""
-    archivo.seek(0)
-    raw = archivo.read()
-    wb  = openpyxl.load_workbook(io.BytesIO(raw), data_only=True)
-    hoja = next((s for s in wb.sheetnames if hint.lower() in s.lower()), None)
-    if hoja is None:
-        return None, None, None, raw
-
-    ws = wb[hoja]
-    hr = detectar_fila_header(ws)
-
-    headers, seen = [], {}
-    for c in range(1, ws.max_column + 1):
-        v    = ws.cell(hr, c).value
-        name = str(v).strip() if v is not None else f"__COL{c}__"
-        if name in seen:
-            seen[name] += 1
-            name = f"{name}__{seen[name]}"
-        else:
-            seen[name] = 1
-        headers.append(name)
-
-    rows = []
-    for r in range(hr + 1, ws.max_row + 1):
-        fila = [ws.cell(r, c).value for c in range(1, ws.max_column + 1)]
-        if any(v is not None for v in fila):
-            rows.append(fila)
-
-    df = pd.DataFrame(rows, columns=headers)
-    return df, hoja, hr, raw
+@st.cache_data(show_spinner="Leyendo archivos...")
+def cargar_archivos(raw33, raw32):
+    """
+    Lee y parsea ambos archivos UNA sola vez por contenido.
+    Gracias a @st.cache_data, en los re-runs de Streamlit (clic en botones,
+    selectboxes, descarga…) NO se vuelven a abrir los .xlsx: se devuelve el
+    resultado cacheado. Solo se re-lee si cambia el contenido de algún archivo.
+    """
+    df_datos,   hoja_datos,   hr_datos   = _parse_hoja(raw33, "dato")
+    df_resumen, hoja_resumen, hr_resumen = _parse_hoja(raw33, "resumen", exacta=True)
+    df_32,      hoja_32,      hr_32       = _parse_hoja(raw32, "nomina")
+    return (df_datos, hoja_datos, hr_datos,
+            df_resumen, hoja_resumen, hr_resumen,
+            df_32, hoja_32, hr_32)
 
 
 def col_exacta(df, nombre):
@@ -435,10 +422,14 @@ with col2:
     st.markdown('</div>', unsafe_allow_html=True)
 
 if f33 and f32:
-    with st.spinner("Leyendo archivos..."):
-        df_datos,   hoja_datos,   hr_datos,   _      = leer_hoja(f33, "dato")
-        df_resumen, hoja_resumen, hr_resumen,  _      = leer_hoja_exacta(f33, "resumen")
-        df_32,      hoja_32,      hr_32,       raw_32 = leer_hoja(f32, "nomina")
+    # Bytes de los archivos (estables entre re-runs si el archivo no cambia).
+    raw33 = f33.getvalue()
+    raw_32 = f32.getvalue()
+
+    # Lectura CACHEADA: no se vuelve a abrir el .xlsx en cada re-run.
+    (df_datos, hoja_datos, hr_datos,
+     df_resumen, hoja_resumen, hr_resumen,
+     df_32, hoja_32, hr_32) = cargar_archivos(raw33, raw_32)
 
     m_datos   = automap_33_datos(df_datos)
     m_resumen = automap_33_resumen(df_resumen) if df_resumen is not None else {"id": None, "nombre": None, "valor": None}
@@ -651,31 +642,49 @@ if f33 and f32:
                 extender_formulas=extender,
             )
 
-        if warns:
-            with st.expander(f"⚠️ {len(warns)} advertencias"):
-                for w in warns:
+        # Guardar el resultado en session_state para que sobreviva a los
+        # re-runs (p. ej. al pulsar el botón de descarga, que también re-ejecuta
+        # el script). Así NO se vuelve a procesar el traslado.
+        st.session_state["traslado_resultado"] = {
+            "bytes":    resultado,
+            "n_ok":     n_ok,
+            "n_sn":     n_sn,
+            "ultima":   ultima,
+            "warns":    warns,
+            "hoja":     hoja_32,
+            "extender": extender,
+            "nombre":   f"3_2_actualizado_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        }
+
+    # ── Resultado (persistente entre re-runs) ─────────────────────────────────
+    res = st.session_state.get("traslado_resultado")
+    if res:
+        if res["warns"]:
+            with st.expander(f"⚠️ {len(res['warns'])} advertencias"):
+                for w in res["warns"]:
                     st.warning(w)
 
         msg_formulas = (" · Fórmulas Vr Débito/Crédito extendidas hasta la fila "
-                        f"{ultima}") if extender else ""
+                        f"{res['ultima']}") if res["extender"] else ""
         st.success(
-            f"✅ Bloque 1: {n_ok} filas DATOS escritas · "
-            f"Bloque 2: {n_sn} filas SN actualizadas{msg_formulas} "
-            f"en **{hoja_32}**"
+            f"✅ Bloque 1: {res['n_ok']} filas DATOS escritas · "
+            f"Bloque 2: {res['n_sn']} filas SN actualizadas{msg_formulas} "
+            f"en **{res['hoja']}**"
         )
         st.info("📌 Abre el archivo en Excel: las fórmulas se recalcularán solas "
                 "al abrirlo.")
 
-        nombre = f"3_2_actualizado_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
         st.download_button(
             "⬇️ Descargar 3.2 actualizado",
-            data=resultado,
-            file_name=nombre,
+            data=res["bytes"],
+            file_name=res["nombre"],
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
 
 else:
+    # Sin ambos archivos: limpiar cualquier resultado previo.
+    st.session_state.pop("traslado_resultado", None)
     st.markdown("""
     <div style="text-align:center;padding:60px 20px;color:#999;">
         <div style="font-size:3rem;margin-bottom:16px;">📂</div>
