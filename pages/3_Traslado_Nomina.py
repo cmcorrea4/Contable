@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import io
@@ -848,3 +847,4 @@ else:
             &nbsp;·&nbsp; 3.2 → hoja <b>NÓMINA</b>
         </p>
     </div>""", unsafe_allow_html=True)
+
