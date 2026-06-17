@@ -1,7 +1,9 @@
+
 import streamlit as st
 import pandas as pd
 import io
 import openpyxl
+from copy import copy
 from datetime import datetime
 
 if not st.session_state.get("authentication_status"):
@@ -279,14 +281,18 @@ def ejecutar_traslado_doble(
     df_datos, mapa_src_datos, mapa_dst_datos,
     df_resumen, mapa_src_resumen, mapa_dst_resumen,
     col_deteccion_sn,
-    extender_formulas=True,
+    modo="valores",
 ):
     """
     Bloque 1: hoja DATOS -> filas del 3.2 (TODAS las filas, sin tope).
     Bloque 2: hoja Nomina resumen -> filas con COD_DINA == 'SN'.
-    extender_formulas: reescribe A,I,J,K,L,M,N,O,P,Q,R,S,T en cada fila escrita
-                       para que Vr DÉBITO / Vr CRÉDITO calculen en todas las
-                       filas y se corrijan los #REF! de P y T.
+    modo:
+      - "valores":  calcula en Python y escribe los VALORES de A,I,J..T
+                    (Vr Débito/Crédito visibles en cualquier visor, sin Excel).
+      - "formulas": escribe las FÓRMULAS (Excel recalcula al abrir).
+      - "no":       no toca las columnas calculadas.
+    En "valores"/"formulas" se corrigen los #REF! de P y T y se copia el
+    formato de la plantilla a las filas nuevas.
     """
     wb = openpyxl.load_workbook(io.BytesIO(raw_32))
     ws = wb[hoja_32]
@@ -367,22 +373,141 @@ def ejecutar_traslado_doble(
                 f"pero solo hay {len(filas_sn)} filas SN en el 3.2."
             )
 
-    # ── EXTENSIÓN DE FÓRMULAS (Vr DÉBITO / Vr CRÉDITO y dependencias) ─────────
-    if extender_formulas and ultima_dato >= primera_dato:
-        for fe in range(primera_dato, ultima_dato + 1):
-            for c, f in formulas_fila(fe).items():
-                ws.cell(fe, c, value=f)
+    # ── COLUMNAS CALCULADAS (Vr DÉBITO / Vr CRÉDITO y dependencias) ───────────
+    if modo in ("valores", "formulas") and ultima_dato >= primera_dato:
 
-        # Limpiar fórmulas residuales de la plantilla por debajo de la última
-        # fila de datos (la plantilla traía fórmulas hasta ~fila 828).
+        # Copiar el estilo/formato de la primera fila (patrón de la plantilla)
+        # a las demás filas escritas, para que Vr Débito/Crédito y el resto se
+        # vean con formato contable (p. ej. "-" para ceros) y se mantengan las
+        # bandas de color. Las filas 2..828 ya comparten ese patrón, así que
+        # reaplicarlo no las altera; las filas nuevas (829+) lo necesitan.
+        fila_ref = primera_dato
+        for fe in range(primera_dato + 1, ultima_dato + 1):
+            for c in range(1, ws.max_column + 1):
+                ws.cell(fe, c)._style = copy(ws.cell(fila_ref, c)._style)
+
+        if modo == "formulas":
+            for fe in range(primera_dato, ultima_dato + 1):
+                for c, f in formulas_fila(fe).items():
+                    ws.cell(fe, c, value=f)
+        else:  # valores
+            hom, cc, ter = construir_lookups(raw_32)
+            for fe in range(primera_dato, ultima_dato + 1):
+                B = ws.cell(fe, 2).value
+                D = ws.cell(fe, 4).value
+                E = ws.cell(fe, 5).value
+                H = ws.cell(fe, 8).value
+                U = ws.cell(fe, 21).value
+                vals = calcular_fila(B, D, E, H, U, hom, cc, ter)
+                for c, v in vals.items():
+                    ws.cell(fe, c, value=v)
+
+        # Limpiar lo que la plantilla traía por debajo de la última fila escrita
+        # (fórmulas residuales hasta ~fila 828).
         for fe in range(ultima_dato + 1, ws.max_row + 1):
-            for c in formulas_fila(fe):
+            for c in COLS_CALC:
                 if ws.cell(fe, c).value is not None:
                     ws.cell(fe, c, value=None)
 
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue(), n_ok, n_sn_escritas, ultima_dato, warns
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CÁLCULO EN PYTHON (sin LibreOffice ni Excel)
+# ─────────────────────────────────────────────────────────────────────────────
+# En vez de dejar fórmulas (que un visor no recalcula), se replican los VLOOKUP
+# de la plantilla y se escriben los VALORES directamente. Así Vr DÉBITO /
+# Vr CRÉDITO y las demás columnas calculadas se ven en cualquier programa.
+# Validado: da idéntico al recálculo de Excel/LibreOffice.
+
+COLS_CALC = [1, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]   # A,I,J..T
+
+
+def _norm_key(v):
+    """Clave de búsqueda robusta (numérica si parece número, si no texto)."""
+    if v is None:
+        return None
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    if isinstance(v, (int, float)):
+        return v
+    s = str(v).strip()
+    try:
+        f = float(s)
+        return int(f) if f.is_integer() else f
+    except ValueError:
+        return s.upper()
+
+
+def construir_lookups(raw_32):
+    """Diccionarios de búsqueda desde las hojas auxiliares del 3.2."""
+    wb = openpyxl.load_workbook(io.BytesIO(raw_32), data_only=True)
+
+    H = wb["HOMOLOGACION CONCEPTOS"]          # clave col B (CODIGO CONCEPTO)
+    hom = {}
+    for r in range(1, H.max_row + 1):
+        k = _norm_key(H.cell(r, 2).value)
+        if k is None or k in hom:
+            continue
+        hom[k] = {
+            "cuenta":        H.cell(r, 4).value,   # D Cuenta contable
+            "doce":          H.cell(r, 5).value,   # E *12
+            "nat":           H.cell(r, 6).value,   # F NAT (D/C)
+            "contrapartida": H.cell(r, 7).value,   # G CONTRAPARTIDA
+            "fuente":        H.cell(r, 9).value,   # I FUENTE (= GRUPO)
+        }
+
+    C = wb["CC"]                               # clave col B (ID) -> col C (NUEVO)
+    cc = {}
+    for r in range(1, C.max_row + 1):
+        k = _norm_key(C.cell(r, 2).value)
+        if k is not None and k not in cc:
+            cc[k] = C.cell(r, 3).value
+
+    T = wb["TERCEROS PILA"]                     # clave col A (NOMBRE) -> col C (NIT)
+    ter = {}
+    for r in range(1, T.max_row + 1):
+        k = _norm_key(T.cell(r, 1).value)
+        if k is not None and k not in ter:
+            ter[k] = T.cell(r, 3).value
+
+    return hom, cc, ter
+
+
+def calcular_fila(B, D, E, H, U, hom, cc, ter):
+    """Replica las fórmulas de la hoja NÓMINA. Devuelve {col: valor}."""
+    h = H if isinstance(H, (int, float)) else 0
+    # I NETO: negativo si COD_DINA empieza por '3'
+    neto = -h if (B is not None and str(B).strip()[:1] == "3") else h
+
+    rec    = hom.get(_norm_key(D))
+    fuente = rec["fuente"] if rec else None                 # A GRUPO
+    j      = cc.get(_norm_key(E))                           # J CC
+
+    # M NAT
+    if rec is None:
+        nat = None
+    elif rec["nat"] == "D":
+        nat = "C" if h < 0 else "D"
+    else:
+        nat = "C"
+
+    # L CUENTA PUC
+    if j is not None and str(j)[:2] == "12":
+        puc = rec["doce"] if rec else None
+    else:
+        puc = rec["cuenta"] if rec else None
+
+    n = abs(neto) if nat == "D" else 0                      # N Vr DEBITO
+    o = abs(neto) if nat == "C" else 0                      # O Vr CREDITO
+    contrap = rec["contrapartida"] if rec else None         # P CONTRAPARTIDA
+    q = "D" if nat == "C" else "C"                          # Q NAT
+    t = (ter.get(_norm_key(U)) if fuente == "PAGO_SS" else E)   # T ID TERCERO
+
+    return {1: fuente, 9: neto, 10: j, 11: j, 12: puc, 13: nat,
+            14: n, 15: o, 16: contrap, 17: q, 18: o, 19: n, 20: t}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -515,19 +640,35 @@ if f33 and f32:
                 index=idx(op32, m32["valor"]),      key="t_val")
 
     # ── Opciones ──────────────────────────────────────────────────────────────
-    with st.expander("🧮 Opciones de fórmulas", expanded=True):
-        extender = st.checkbox(
-            "Extender fórmulas Vr Débito / Vr Crédito a todas las filas "
-            "(y corregir #REF! de CONTRAPARTIDA e ID TERCERO)",
-            value=True,
+    with st.expander("🧮 Opciones de columnas calculadas", expanded=True):
+        modo_label = st.radio(
+            "¿Cómo llenar Vr Débito / Vr Crédito y las demás columnas calculadas?",
+            [
+                "Valores (recomendado · se ven en cualquier visor, sin Excel)",
+                "Fórmulas (Excel las recalcula al abrir)",
+                "No tocar (solo trasladar datos)",
+            ],
+            index=0,
         )
-        st.markdown(
-            '<div class="info-box">ℹ️ Las fórmulas se escriben como texto; '
-            '<b>Excel las recalcula automáticamente al abrir el archivo</b>. '
-            'Si necesitas los valores ya calculados sin abrir Excel, hay que '
-            'pasar el archivo por LibreOffice en el servidor.</div>',
-            unsafe_allow_html=True
-        )
+        modo = ("valores" if modo_label.startswith("Valores")
+                else "formulas" if modo_label.startswith("Fórmulas")
+                else "no")
+        if modo == "valores":
+            st.markdown(
+                '<div class="info-box">ℹ️ Se calculan en Python (replicando los '
+                'VLOOKUP de la plantilla) y se escriben como valores. '
+                'No requiere LibreOffice ni recalcular en Excel. También se '
+                'corrigen los #REF! de CONTRAPARTIDA e ID TERCERO y se copia el '
+                'formato a las filas nuevas.</div>',
+                unsafe_allow_html=True
+            )
+        elif modo == "formulas":
+            st.markdown(
+                '<div class="warn-box">⚠️ Con fórmulas, las columnas se ven '
+                'vacías hasta que <b>Excel recalcule al abrir</b> (un visor que '
+                'no recalcula las mostrará en blanco).</div>',
+                unsafe_allow_html=True
+            )
 
     # ── Vista previa ──────────────────────────────────────────────────────────
     st.markdown("---")
@@ -633,13 +774,13 @@ if f33 and f32:
             "valor":      m32["valor"],
         }
 
-        with st.spinner("Procesando los dos bloques y extendiendo fórmulas..."):
+        with st.spinner("Procesando traslado y calculando columnas..."):
             resultado, n_ok, n_sn, ultima, warns = ejecutar_traslado_doble(
                 raw_32, hoja_32, hr_32,
                 df_datos, mapa_src_datos, mapa_dst_datos,
                 df_resumen, mapa_src_resumen, mapa_dst_resumen,
                 m32["cod_dina"],
-                extender_formulas=extender,
+                modo=modo,
             )
 
         # Guardar el resultado en session_state para que sobreviva a los
@@ -652,7 +793,7 @@ if f33 and f32:
             "ultima":   ultima,
             "warns":    warns,
             "hoja":     hoja_32,
-            "extender": extender,
+            "modo":     modo,
             "nombre":   f"3_2_actualizado_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
         }
 
@@ -664,15 +805,28 @@ if f33 and f32:
                 for w in res["warns"]:
                     st.warning(w)
 
-        msg_formulas = (" · Fórmulas Vr Débito/Crédito extendidas hasta la fila "
-                        f"{res['ultima']}") if res["extender"] else ""
+        modo_res = res.get("modo", "valores")
+        if modo_res == "valores":
+            extra = (" · Vr Débito/Crédito calculados y escritos hasta la fila "
+                     f"{res['ultima']}")
+        elif modo_res == "formulas":
+            extra = (" · Fórmulas extendidas hasta la fila "
+                     f"{res['ultima']}")
+        else:
+            extra = ""
         st.success(
             f"✅ Bloque 1: {res['n_ok']} filas DATOS escritas · "
-            f"Bloque 2: {res['n_sn']} filas SN actualizadas{msg_formulas} "
+            f"Bloque 2: {res['n_sn']} filas SN actualizadas{extra} "
             f"en **{res['hoja']}**"
         )
-        st.info("📌 Abre el archivo en Excel: las fórmulas se recalcularán solas "
-                "al abrirlo.")
+
+        if modo_res == "valores":
+            st.success("🧮 Columnas calculadas en Python: Vr Débito / Vr Crédito "
+                       "se ven directamente, sin abrir Excel ni LibreOffice.")
+        elif modo_res == "formulas":
+            st.info("📌 Abre el archivo en Excel: las fórmulas se recalcularán "
+                    "solas al abrirlo (un visor que no recalcula las verá "
+                    "vacías).")
 
         st.download_button(
             "⬇️ Descargar 3.2 actualizado",
