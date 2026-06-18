@@ -13,7 +13,7 @@ if not st.session_state.get("authentication_status"):
 st.set_page_config(page_title="Traslado Nómina", page_icon="📋", layout="wide")
 
 # Cambia al editar la lógica: invalida resultados viejos guardados en memoria.
-APP_VERSION = "v3-valores-2025"
+APP_VERSION = "v4-valores-2025"
 
 st.markdown("""
 <style>
@@ -643,32 +643,27 @@ if f33 and f32:
 
     # ── Opciones ──────────────────────────────────────────────────────────────
     with st.expander("🧮 Opciones de columnas calculadas", expanded=True):
-        modo_label = st.radio(
-            "¿Cómo llenar Vr Débito / Vr Crédito y las demás columnas calculadas?",
-            [
-                "Valores (recomendado · se ven en cualquier visor, sin Excel)",
-                "Fórmulas (Excel las recalcula al abrir)",
-                "No tocar (solo trasladar datos)",
-            ],
-            index=0,
+        usar_formulas = st.checkbox(
+            "Usar fórmulas de Excel en lugar de valores "
+            "(solo si SIEMPRE abrirás el archivo en Excel)",
+            value=False,
         )
-        modo = ("valores" if modo_label.startswith("Valores")
-                else "formulas" if modo_label.startswith("Fórmulas")
-                else "no")
+        modo = "formulas" if usar_formulas else "valores"
         if modo == "valores":
             st.markdown(
-                '<div class="info-box">ℹ️ Se calculan en Python (replicando los '
-                'VLOOKUP de la plantilla) y se escriben como valores. '
-                'No requiere LibreOffice ni recalcular en Excel. También se '
-                'corrigen los #REF! de CONTRAPARTIDA e ID TERCERO y se copia el '
-                'formato a las filas nuevas.</div>',
+                '<div class="info-box">✅ <b>Modo Valores</b>: Vr Débito / Vr '
+                'Crédito y las demás columnas se calculan en Python y se '
+                'escriben como números. Se ven en cualquier programa, sin Excel '
+                'ni LibreOffice. (Se corrigen los #REF! de CONTRAPARTIDA e ID '
+                'TERCERO y se copia el formato a las filas nuevas.)</div>',
                 unsafe_allow_html=True
             )
-        elif modo == "formulas":
+        else:
             st.markdown(
-                '<div class="warn-box">⚠️ Con fórmulas, las columnas se ven '
-                'vacías hasta que <b>Excel recalcule al abrir</b> (un visor que '
-                'no recalcula las mostrará en blanco).</div>',
+                '<div class="warn-box">⚠️ <b>Modo Fórmulas</b>: las columnas se '
+                'ven vacías hasta que <b>Excel recalcule al abrir</b>. Un visor '
+                'que no recalcula (o filas pegadas sin recálculo) las mostrará '
+                'en blanco con el fondo naranja. Usa Valores si dudas.</div>',
                 unsafe_allow_html=True
             )
 
@@ -840,6 +835,30 @@ if f33 and f32:
                     "solas al abrirlo (un visor que no recalcula las verá "
                     "vacías).")
 
+        # ── Vista previa de las ÚLTIMAS filas (verificación rápida) ───────────
+        if modo_res == "valores":
+            try:
+                wbp = openpyxl.load_workbook(io.BytesIO(res["bytes"]), data_only=True)
+                wsp = wbp[res["hoja"]]
+                ult = res["ultima"]
+                ini = max(2, ult - 7)
+                filas = []
+                for r in range(ini, ult + 1):
+                    filas.append({
+                        "Fila":       r,
+                        "COD_DINA":   wsp.cell(r, 2).value,
+                        "CONCEPTO":   wsp.cell(r, 3).value,
+                        "VALOR":      wsp.cell(r, 8).value,
+                        "Vr DEBITO":  wsp.cell(r, 14).value,
+                        "Vr CREDITO": wsp.cell(r, 15).value,
+                    })
+                st.caption("🔍 Últimas filas del archivo generado "
+                           "(Vr Débito / Vr Crédito ya calculados):")
+                st.dataframe(pd.DataFrame(filas), use_container_width=True,
+                             hide_index=True)
+            except Exception:
+                pass
+
         st.download_button(
             "⬇️ Descargar 3.2 actualizado",
             data=res["bytes"],
@@ -860,3 +879,4 @@ else:
             &nbsp;·&nbsp; 3.2 → hoja <b>NÓMINA</b>
         </p>
     </div>""", unsafe_allow_html=True)
+
