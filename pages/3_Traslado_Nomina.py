@@ -549,20 +549,8 @@ if f33 and f32:
             m32["horas"]      = st.selectbox("HORAS",           op32, index=idx(op32, m32["horas"]),      key="t_hor")
             m32["valor"]      = st.selectbox("VALOR",           op32, index=idx(op32, m32["valor"]),      key="t_val")
 
-    with st.expander("🧮 Opciones de columnas calculadas", expanded=True):
-        usar_formulas = st.checkbox(
-            "Usar fórmulas de Excel en lugar de valores "
-            "(solo si SIEMPRE abrirás el archivo en Excel)", value=False)
-        modo = "formulas" if usar_formulas else "valores"
-        if modo == "valores":
-            st.markdown('<div class="info-box">✅ <b>Modo Valores</b>: Vr Débito / Vr '
-                        'Crédito se calculan en Python y se escriben como números. '
-                        'Se ven en cualquier programa, sin recalcular.</div>',
-                        unsafe_allow_html=True)
-        else:
-            st.markdown('<div class="warn-box">⚠️ <b>Modo Fórmulas</b>: las columnas '
-                        'se ven <b>vacías (naranja)</b> hasta que Excel recalcule al '
-                        'abrir. Usa Valores si dudas.</div>', unsafe_allow_html=True)
+    # Modo fijo: siempre Valores (Vr Débito/Crédito se escriben como números).
+    modo = "valores"
 
     st.markdown("---")
     if st.button("🚀 Ejecutar traslado completo y generar 3.2 actualizado",
@@ -637,21 +625,6 @@ if f33 and f32:
         if res["modo"] == "formulas":
             st.info("📌 Modo Fórmulas: ábrelo en Excel para que recalcule (un visor "
                     "que no recalcula las verá naranjas y vacías).")
-
-        # Vista previa de las últimas filas generadas
-        if res["modo"] == "valores":
-            try:
-                wsp = openpyxl.load_workbook(io.BytesIO(res["bytes"]), data_only=True)[res["hoja"]]
-                ult = res["ultima"]; ini = max(2, ult - 7)
-                filas = [{
-                    "Fila": r, "COD_DINA": wsp.cell(r, 2).value,
-                    "CONCEPTO": wsp.cell(r, 3).value, "VALOR": wsp.cell(r, 8).value,
-                    "Vr DEBITO": wsp.cell(r, 14).value, "Vr CREDITO": wsp.cell(r, 15).value,
-                } for r in range(ini, ult + 1)]
-                st.caption("🔍 Últimas filas generadas:")
-                st.dataframe(pd.DataFrame(filas), use_container_width=True, hide_index=True)
-            except Exception:
-                pass
 
         st.download_button(
             "⬇️ Descargar 3.2 actualizado", data=res["bytes"],
