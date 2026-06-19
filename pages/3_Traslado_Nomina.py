@@ -607,12 +607,7 @@ if f33 and f32:
 
         # ── AUTOCHEQUEO visible: debe ser 0 ──
         cM, cT = st.columns(2)
-        with cM:
-            st.metric("Filas SIN Vr Débito/Crédito", res.get("sin_calc", 0),
-                      help="Debe ser 0. Si es >0, hay filas cuyo COD_HELISA no "
-                           "está en HOMOLOGACION o el VALOR llegó vacío.")
-        with cT:
-            st.metric("Última fila escrita", res.get("ultima", 0))
+        
 
         if res.get("sin_calc", 0) == 0:
             st.success(f"✅ {res['n_ok']} filas DATOS · {res['n_sn']} filas SN · "
