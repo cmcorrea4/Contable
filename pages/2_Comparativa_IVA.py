@@ -1,3 +1,4 @@
+import re
 import streamlit as st
 import pandas as pd
 import io
@@ -28,95 +29,188 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+# ── Utilidades NIT ───────────────────────────────────────────────────────────
+
+def normalizar_nit(nit):
+    """Deja solo dígitos (quita puntos, guiones, .0 de floats, etc.)."""
+    return re.sub(r"[^0-9]", "", str(nit or ""))
+
+
+def claves_nit(nit):
+    """Variantes del NIT (con y sin posible dígito de verificación) para
+    poder cruzar NIT del documento (sin DV) vs Identificación del libro
+    (a veces con el DV pegado al final)."""
+    n = normalizar_nit(nit)
+    claves = {n} if n else set()
+    if len(n) > 1:
+        claves.add(n[:-1])
+    return claves
+
+
 # ── Loaders ─────────────────────────────────────────────────────────────────
 
 def cargar_facturas(archivo):
-    """Carga facturas electrónicas. Devuelve dos DataFrames: facturas normales y notas de crédito."""
+    """Carga facturas electrónicas. Devuelve dos DataFrames (facturas y notas
+    de crédito) con columnas NIT / Nombre / IVA / Direccion, donde Direccion
+    indica si el documento fue 'venta' (emitido por la empresa) o 'compra'
+    (recibido), determinado automáticamente comparando NIT Emisor/Receptor
+    contra el NIT propio detectado."""
     df = pd.read_excel(archivo, header=0, engine="openpyxl")
     df.columns = [str(c).strip() for c in df.columns]
 
     col_tipo   = next((c for c in df.columns if "tipo" in c.lower() and "documento" in c.lower()), df.columns[0])
     col_nit    = next((c for c in df.columns if "nit" in c.lower() and "emisor" in c.lower()), None)
     col_nombre = next((c for c in df.columns if "nombre" in c.lower() and "emisor" in c.lower()), None)
+    col_nit_r    = next((c for c in df.columns if "nit" in c.lower() and "receptor" in c.lower()), None)
+    col_nombre_r = next((c for c in df.columns if "nombre" in c.lower() and "receptor" in c.lower()), None)
     col_iva    = next((c for c in df.columns if c.strip().upper() == "IVA"), None)
+    col_grupo  = next((c for c in df.columns if "grupo" in c.lower()), None)
 
     if not all([col_nit, col_nombre, col_iva]):
         st.error(f"Columnas no encontradas en Facturas. Disponibles: {list(df.columns)}")
         return None, None, None, None, None, None
 
-    df[col_nit]    = df[col_nit].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+    df[col_nit]    = df[col_nit].apply(normalizar_nit)
     df[col_nombre] = df[col_nombre].astype(str).str.strip()
     df[col_iva]    = pd.to_numeric(df[col_iva], errors="coerce")
 
-    mask_nc = df[col_tipo].astype(str).str.strip().str.lower().str.contains("nota de cr")
-    df_fact = df[~mask_nc][[col_nit, col_nombre, col_iva]].copy()
-    df_nc   = df[mask_nc][[col_nit, col_nombre, col_iva]].copy()
+    tiene_receptor = bool(col_nit_r and col_nombre_r)
+    nit_propio = None
 
-    return df_fact, df_nc, col_nit, col_nombre, col_iva
+    if tiene_receptor:
+        df[col_nit_r]    = df[col_nit_r].apply(normalizar_nit)
+        df[col_nombre_r] = df[col_nombre_r].astype(str).str.strip()
+
+        # NIT propio = el que más se repite entre Emisor + Receptor
+        conteo = pd.concat([df[col_nit], df[col_nit_r]]).value_counts()
+        if len(conteo) > 0:
+            nit_propio = conteo.index[0]
+
+        if col_grupo:
+            es_venta = df[col_grupo].astype(str).str.strip().str.lower().eq("emitido")
+        else:
+            es_venta = df[col_nit] == nit_propio
+
+        df["_NIT"]       = df[col_nit_r].where(es_venta, df[col_nit])
+        df["_Nombre"]    = df[col_nombre_r].where(es_venta, df[col_nombre])
+        df["_Direccion"] = es_venta.map({True: "venta", False: "compra"})
+    else:
+        # Sin columna de receptor: se mantiene el comportamiento anterior (solo compras)
+        df["_NIT"]       = df[col_nit]
+        df["_Nombre"]    = df[col_nombre]
+        df["_Direccion"] = "compra"
+
+    df["_IVA"] = df[col_iva]
+
+    mask_nc = df[col_tipo].astype(str).str.strip().str.lower().str.contains("nota de cr")
+    cols = ["_NIT", "_Nombre", "_IVA", "_Direccion"]
+    ren  = {"_NIT": "NIT", "_Nombre": "Nombre", "_IVA": "IVA", "_Direccion": "Direccion"}
+    df_fact = df[~mask_nc][cols].rename(columns=ren).copy()
+    df_nc   = df[mask_nc][cols].rename(columns=ren).copy()
+
+    return df_fact, df_nc, nit_propio, tiene_receptor, None, None
 
 
 def cargar_libro_iva(archivo):
-    """Carga el libro auxiliar IVA. Devuelve dos DataFrames: valores positivos y negativos."""
+    """Carga el libro auxiliar de IVA y construye índices NIT -> [valores]
+    tanto para 'Valor impuesto ventas' como 'Valor impuesto compras'
+    (y sus columnas de devolución, si existen), con el NIT indexado en sus
+    dos variantes (con/sin dígito de verificación)."""
     df_raw = pd.read_excel(archivo, header=None, engine="openpyxl")
     header_row = next((i for i, row in df_raw.iterrows()
                        if any("identificaci" in str(v).lower() for v in row.values)), None)
     if header_row is None:
         st.error("No se encontró fila de encabezados en el Libro IVA.")
-        return None, None, None, None
+        return None
 
     df = df_raw.iloc[header_row + 1:].copy()
     df.columns = [str(c).strip() for c in df_raw.iloc[header_row].values]
 
     col_id     = next((c for c in df.columns if "identificaci" in c.lower()), None)
     col_nombre = next((c for c in df.columns if "nombre" in c.lower() and "tercero" in c.lower()), None)
-    col_vic    = next((c for c in df.columns if "valor" in c.lower() and "impuesto" in c.lower() and "compra" in c.lower()), None)
+    col_vic    = next((c for c in df.columns if "valor" in c.lower() and "impuesto" in c.lower() and "compra" in c.lower() and "devoluci" not in c.lower()), None)
+    col_viv    = next((c for c in df.columns if "valor" in c.lower() and "impuesto" in c.lower() and "venta" in c.lower() and "devoluci" not in c.lower()), None)
+    col_vidc   = next((c for c in df.columns if "valor" in c.lower() and "devoluci" in c.lower() and "compra" in c.lower()), None)
+    col_vidv   = next((c for c in df.columns if "valor" in c.lower() and "devoluci" in c.lower() and "venta" in c.lower()), None)
 
     if not all([col_id, col_nombre, col_vic]):
         st.error(f"Columnas no encontradas en Libro IVA. Disponibles: {list(df.columns)}")
-        return None, None, None, None
+        return None
 
-    df[col_id]     = pd.to_numeric(df[col_id], errors="coerce")
-    df             = df[df[col_id].notna()].copy()
-    df[col_id]     = df[col_id].astype(int).astype(str)
+    if col_viv is None:
+        st.warning("⚠️ No se encontró la columna 'Valor impuesto ventas' en el Libro IVA. "
+                   "Los documentos emitidos (ventas) no podrán conciliarse.")
+
+    df[col_id]     = df[col_id].apply(normalizar_nit)
+    df             = df[df[col_id] != ""].copy()
     df[col_nombre] = df[col_nombre].astype(str).str.strip()
-    df[col_vic]    = pd.to_numeric(df[col_vic], errors="coerce")
-    df             = df.dropna(subset=[col_vic]).reset_index(drop=True)
+    for c in [col_vic, col_viv, col_vidc, col_vidv]:
+        if c is not None:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    df_pos = df[df[col_vic] > 0][[col_id, col_nombre, col_vic]].copy()
-    df_neg = df[df[col_vic] < 0][[col_id, col_nombre, col_vic]].copy()
-    df_neg = df_neg.copy()
-    df_neg[col_vic] = df_neg[col_vic].abs()
+    def construir_indice(col_valor):
+        idx_valores, idx_nombres = {}, {}
+        if col_valor is None:
+            return idx_valores, idx_nombres
+        for _, row in df.iterrows():
+            v = row[col_valor]
+            if pd.isna(v) or v == 0:
+                continue
+            v = round(abs(float(v)), 2)
+            for k in claves_nit(row[col_id]):
+                idx_valores.setdefault(k, []).append(v)
+                idx_nombres.setdefault(k, row[col_nombre])
+        return idx_valores, idx_nombres
 
-    return df_pos, df_neg, col_id, col_nombre, col_vic
+    idx_compras, nom_compras   = construir_indice(col_vic)
+    idx_ventas,  nom_ventas    = construir_indice(col_viv)
+    idx_dev_compras, nom_dc    = construir_indice(col_vidc)
+    idx_dev_ventas,  nom_dv    = construir_indice(col_vidv)
+
+    return {
+        "compras": (idx_compras, nom_compras),
+        "ventas": (idx_ventas, nom_ventas),
+        "dev_compras": (idx_dev_compras, nom_dc),
+        "dev_ventas": (idx_dev_ventas, nom_dv),
+        "tiene_ventas": col_viv is not None,
+        "tiene_devoluciones": (col_vidc is not None) or (col_vidv is not None),
+    }
 
 
 # ── Comparador genérico ──────────────────────────────────────────────────────
 
-def comparar(df_fact, col_nit, col_nombre_f, col_iva,
-             df_libro, col_id, col_nombre_l, col_vic, tolerancia):
-    idx_nit_iva    = {}
-    idx_nit_nombre = {}
-    for _, row in df_libro.iterrows():
-        nit = str(row[col_id]).strip()
-        vic = round(float(row[col_vic]), 2) if pd.notna(row[col_vic]) else None
-        if vic is not None:
-            idx_nit_iva.setdefault(nit, []).append(vic)
-        if nit not in idx_nit_nombre:
-            idx_nit_nombre[nit] = str(row[col_nombre_l]).strip()
-
+def comparar(df_fact, libro, tolerancia, es_nota_credito=False):
     filas = []
     for _, row in df_fact.iterrows():
-        nit      = str(row[col_nit]).strip()
-        nombre_f = str(row[col_nombre_f]).strip()
-        iva      = round(float(row[col_iva]), 2) if pd.notna(row[col_iva]) else 0.0
-        nit_ok   = nit in idx_nit_iva
-        nombre_l = idx_nit_nombre.get(nit, "") if nit_ok else ""
+        nit       = str(row["NIT"]).strip()
+        nombre_f  = str(row["Nombre"]).strip()
+        iva       = round(float(row["IVA"]), 2) if pd.notna(row["IVA"]) else 0.0
+        direccion = row["Direccion"]
 
-        # ── Lógica IVA = 0: no se cruza contra el libro, se marca correcto directamente ──
+        if es_nota_credito:
+            clave_idx = "dev_ventas" if direccion == "venta" else "dev_compras"
+        else:
+            clave_idx = "ventas" if direccion == "venta" else "compras"
+        idx_nit_iva, idx_nit_nombre = libro[clave_idx]
+
+        nit_ok = False
+        valores = None
+        for k in claves_nit(nit):
+            if k in idx_nit_iva:
+                nit_ok = True
+                valores = idx_nit_iva[k]
+                break
+        nombre_l = ""
+        for k in claves_nit(nit):
+            if k in idx_nit_nombre:
+                nombre_l = idx_nit_nombre[k]
+                break
+
+        # ── Lógica IVA = 0: no hay nada que cruzar contra el libro ──
         if iva == 0.0:
             estado = "✅ CORRECTO (IVA $0)"
             iva_ok = True
-        elif nit_ok and any(abs(iva - v) <= tolerancia for v in idx_nit_iva[nit]):
+        elif nit_ok and any(abs(iva - v) <= tolerancia for v in valores):
             estado = "✅ CORRECTO"
             iva_ok = True
         elif nit_ok:
@@ -127,12 +221,13 @@ def comparar(df_fact, col_nit, col_nombre_f, col_iva,
             iva_ok = False
 
         filas.append({
-            "NIT Emisor":            nit,
-            "Nombre Emisor":         nombre_f,
-            "IVA Documento":         iva,
+            "NIT":                    nit,
+            "Nombre":                 nombre_f,
+            "Dirección":              "Venta (emitido)" if direccion == "venta" else "Compra (recibido)",
+            "IVA Documento":          iva,
             "Nombre Tercero (Libro)": nombre_l,
-            "IVA en Libro":          "✅" if iva_ok else "❌",
-            "Estado":                estado,
+            "IVA en Libro":           "✅" if iva_ok else "❌",
+            "Estado":                 estado,
         })
     return pd.DataFrame(filas)
 
@@ -147,7 +242,6 @@ def exportar_excel(df_fact_res, df_nc_res):
 
 def mostrar_resultado(df_res, key_prefix):
     total     = len(df_res)
-    # Correctos incluye tanto "✅ CORRECTO" como "✅ CORRECTO (IVA $0)"
     correctos = df_res["Estado"].str.startswith("✅").sum()
     iva_no    = (df_res["Estado"] == "⚠️ NIT OK / IVA NO ENCONTRADO").sum()
     nit_no    = (df_res["Estado"] == "❌ NIT NO ENCONTRADO").sum()
@@ -193,18 +287,18 @@ def mostrar_resultado(df_res, key_prefix):
 st.markdown("""
 <div class="header-block">
     <h1>🧾 Comparativa IVA — Facturas & Notas de Crédito vs Libro Contable</h1>
-    <p>Verifica NIT Emisor, Nombre e IVA de facturas y notas de crédito electrónicas contra el libro auxiliar de IVA</p>
+    <p>Verifica NIT, Nombre e IVA de facturas y notas de crédito electrónicas (emitidas y recibidas) contra el libro auxiliar de IVA</p>
 </div>""", unsafe_allow_html=True)
 
 col1, col2 = st.columns(2)
 with col1:
     st.markdown('<div class="upload-section"><p class="section-title">📄 Facturas Electrónicas (Excel)</p>', unsafe_allow_html=True)
-    st.caption("Tipo de documento · NIT Emisor · Nombre Emisor · IVA")
+    st.caption("Tipo de documento · NIT/Nombre Emisor · NIT/Nombre Receptor (opcional) · IVA")
     archivo_fact = st.file_uploader("Facturas", type=["xlsx", "xls"], key="fact", label_visibility="collapsed")
     st.markdown('</div>', unsafe_allow_html=True)
 with col2:
     st.markdown('<div class="upload-section"><p class="section-title">📊 Libro Auxiliar IVA (Excel)</p>', unsafe_allow_html=True)
-    st.caption("Identificación · Nombre tercero · Valor impuesto compras (positivos y negativos)")
+    st.caption("Identificación · Nombre tercero · Valor impuesto ventas / compras")
     archivo_libro = st.file_uploader("Libro IVA", type=["xlsx", "xls"], key="libro", label_visibility="collapsed")
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -216,30 +310,39 @@ with st.expander("⚙️ Opciones avanzadas"):
 
 if archivo_fact and archivo_libro:
     with st.spinner("Procesando..."):
-        df_fact, df_nc, col_nit, col_nombre_f, col_iva = cargar_facturas(archivo_fact)
-        df_libro_pos, df_libro_neg, col_id, col_nombre_l, col_vic = cargar_libro_iva(archivo_libro)
+        df_fact, df_nc, nit_propio, tiene_receptor, _, _ = cargar_facturas(archivo_fact)
+        libro = cargar_libro_iva(archivo_libro)
 
-    if df_fact is None or df_libro_pos is None:
+    if df_fact is None or libro is None:
         st.stop()
 
-    df_fact_res = comparar(df_fact, col_nit, col_nombre_f, col_iva,
-                           df_libro_pos, col_id, col_nombre_l, col_vic, tolerancia)
-    df_nc_res   = comparar(df_nc, col_nit, col_nombre_f, col_iva,
-                           df_libro_neg, col_id, col_nombre_l, col_vic, tolerancia)
+    if tiene_receptor and nit_propio:
+        st.caption(f"🏢 NIT propio detectado automáticamente: **{nit_propio}** "
+                   f"(usado para saber si cada documento es venta o compra)")
+    elif not tiene_receptor:
+        st.info("El archivo de facturas no tiene columna de NIT Receptor: todo se tratará como compra "
+                "(comportamiento anterior).")
+    if not libro["tiene_ventas"]:
+        st.info("El libro no tiene columna de ventas: solo se conciliarán documentos de compra.")
+
+    df_fact_res = comparar(df_fact, libro, tolerancia, es_nota_credito=False)
+    df_nc_res   = comparar(df_nc, libro, tolerancia, es_nota_credito=True) if libro["tiene_devoluciones"] else pd.DataFrame(columns=df_fact_res.columns)
 
     st.markdown("---")
     tab1, tab2 = st.tabs(["🧾 Facturas Electrónicas", "🔄 Notas de Crédito Electrónicas"])
 
     with tab1:
-        st.markdown('<p class="tab-header">Facturas vs. Valores positivos en Libro IVA</p>', unsafe_allow_html=True)
+        st.markdown('<p class="tab-header">Facturas (ventas → Valor impuesto ventas · compras → Valor impuesto compras)</p>', unsafe_allow_html=True)
         if len(df_fact_res) == 0:
             st.info("No se encontraron facturas electrónicas en el archivo.")
         else:
             mostrar_resultado(df_fact_res, "fact")
 
     with tab2:
-        st.markdown('<p class="tab-header">Notas de Crédito vs. Valores negativos en Libro IVA (comparados en valor absoluto)</p>', unsafe_allow_html=True)
-        if len(df_nc_res) == 0:
+        st.markdown('<p class="tab-header">Notas de Crédito (contra columnas de devolución en ventas/compras)</p>', unsafe_allow_html=True)
+        if not libro["tiene_devoluciones"]:
+            st.warning("El libro cargado no tiene columnas de devolución (ventas/compras); no se pueden conciliar notas de crédito.")
+        elif len(df_nc_res) == 0:
             st.info("No se encontraron notas de crédito electrónicas en el archivo.")
         else:
             mostrar_resultado(df_nc_res, "nc")
@@ -268,14 +371,9 @@ if archivo_fact and archivo_libro:
         )
 
     with st.expander("🔎 Vista previa archivos cargados"):
-        t1, t2, t3, t4 = st.tabs([
-            "Facturas (archivo)", "Notas de Crédito (archivo)",
-            "Libro IVA — Positivos", "Libro IVA — Negativos (abs)"
-        ])
+        t1, t2 = st.tabs(["Facturas (normalizado)", "Notas de Crédito (normalizado)"])
         with t1: st.dataframe(df_fact, use_container_width=True, height=300)
         with t2: st.dataframe(df_nc, use_container_width=True, height=300)
-        with t3: st.dataframe(df_libro_pos, use_container_width=True, height=300)
-        with t4: st.dataframe(df_libro_neg, use_container_width=True, height=300)
 
 else:
     st.markdown("""
@@ -283,11 +381,14 @@ else:
         <div style="font-size:3rem;margin-bottom:16px;">📂</div>
         <p style="font-size:1.1rem;font-weight:600;">Carga los dos archivos para iniciar</p>
         <p style="font-size:.9rem;">
-            Facturas (Tipo · NIT Emisor · Nombre Emisor · IVA) &nbsp;·&nbsp;
-            Libro IVA (Identificación · Nombre tercero · Valor impuesto compras)
+            Facturas (Tipo · NIT/Nombre Emisor · NIT/Nombre Receptor · IVA) &nbsp;·&nbsp;
+            Libro IVA (Identificación · Nombre tercero · Valor impuesto ventas/compras)
         </p>
         <p style="font-size:.85rem;color:#bbb;margin-top:8px;">
-            Las <strong>Notas de Crédito</strong> se detectan automáticamente en la columna "Tipo de documento"
-            y se comparan contra los valores <em>negativos</em> del Libro IVA.
+            La app detecta automáticamente el <strong>NIT propio</strong> de la empresa para saber
+            si cada documento fue <em>emitido</em> (venta, se compara contra "Valor impuesto ventas")
+            o <em>recibido</em> (compra, contra "Valor impuesto compras"). Las
+            <strong>Notas de Crédito</strong> se detectan en "Tipo de documento" y se comparan
+            contra las columnas de devolución correspondientes.
         </p>
     </div>""", unsafe_allow_html=True)
