@@ -17,7 +17,7 @@ st.set_page_config(page_title="Traslado Nómina", page_icon="📋", layout="wide
 # Aparece en el sidebar como "Build:". Si en pantalla NO ves esta misma cadena,
 # tu app NO está corriendo este archivo (otro proceso, otra ruta u otro puerto).
 # ─────────────────────────────────────────────────────────────────────────────
-APP_VERSION = "v5-2026-06-19"
+APP_VERSION = "v6-2026-07-27"
 
 st.markdown("""
 <style>
@@ -159,8 +159,6 @@ def _parse_hoja(raw, hint_hoja, exacta=False):
 
 @st.cache_data(show_spinner="Leyendo archivos...")
 def cargar_archivos(raw33, raw32, _ver):
-    # _ver = APP_VERSION: al cambiar la versión, la firma del cache cambia y se
-    # vuelve a leer (no quedan datos de una versión anterior).
     df_datos,   hoja_datos,   hr_datos   = _parse_hoja(raw33, "dato")
     df_resumen, hoja_resumen, hr_resumen = _parse_hoja(raw33, "resumen", exacta=True)
     df_32,      hoja_32,      hr_32       = _parse_hoja(raw32, "nomina")
@@ -202,6 +200,16 @@ def automap_33_datos(df):
 
 def automap_33_resumen(df):
     cols = list(df.columns)
+    # La columna H es Total Suma de ValorPago (Salario Neto, índice 7 si la tabla es de 8 columnas)
+    col_h_val = None
+    for c in cols:
+        cn = str(c).strip().upper()
+        if "TOTAL SUMA DE VALORPAGO" in cn or "VALORPAGO__2" in cn:
+            col_h_val = c
+            break
+    if not col_h_val:
+        col_h_val = cols[7] if len(cols) > 7 else (cols[-1] if cols else None)
+
     return {
         "id":     (col_exacta(df, "ID") or col_parcial(df, "CEDULA") or
                    col_parcial(df, "IDENTIF") or (cols[0] if cols else None)),
@@ -209,8 +217,7 @@ def automap_33_resumen(df):
                    col_exacta(df, "NOMBRECOMPLETO") or
                    col_parcial(df, "NOMBRE", "COMPLETO") or
                    col_parcial(df, "NOMBRE") or (cols[1] if len(cols) > 1 else None)),
-        "valor":  (col_exacta(df, "VALOR") or col_parcial(df, "VALOR") or
-                   (cols[7] if len(cols) > 7 else None)),
+        "valor":  col_h_val,
     }
 
 
@@ -340,7 +347,7 @@ def ejecutar_traslado_doble(
     col_idx = build_col_idx(ws, hr_32)
     warns   = []
 
-    # BLOQUE 1: hoja DATOS, TODAS las filas (sin tope)
+    # BLOQUE 1: hoja DATOS, TODAS las filas
     primera_dato = hr_32 + 1
     df_d = df_datos.reset_index(drop=True)
     n_ok = 0
@@ -363,61 +370,68 @@ def ejecutar_traslado_doble(
         n_ok += 1
     ultima_dato = primera_dato + len(df_d) - 1
 
-    # BLOQUE 2: filas SN
+    # BLOQUE 2: filas SN anexadas desde Nomina resumen
     n_sn_escritas = 0
+    ultima_escrita = ultima_dato
+
     if df_resumen is not None and len(df_resumen) > 0:
-        cn_dina = col_idx.get(col_deteccion_sn)
-        filas_sn = []
-        if cn_dina:
-            for r in range(hr_32 + 1, ws.max_row + 1):
-                val_dina = ws.cell(r, cn_dina).value
-                if val_dina is not None and str(val_dina).strip().upper() == "SN":
-                    filas_sn.append(r)
-        filas_validas = []
+        cn_cod_dina = col_idx.get("COD_DINA") or col_idx.get(mapa_dst_datos.get("cod_dina", ""))
+        cn_cod_hel  = col_idx.get("COD_HELISA") or col_idx.get(mapa_dst_datos.get("cod_helisa", ""))
+        cn_ced      = col_idx.get("CEDULA") or col_idx.get(mapa_dst_resumen.get("cedula", ""))
+        cn_nom      = col_idx.get("NOMBRE EMPLEADO") or col_idx.get(mapa_dst_resumen.get("nombre_emp", ""))
+        cn_val      = col_idx.get("VALOR") or col_idx.get(mapa_dst_resumen.get("valor", ""))
+
+        fila_sn_inicio = ultima_dato + 1
+        idx_sn = 0
+
+        src_id  = mapa_src_resumen.get("cedula")
+        src_nom = mapa_src_resumen.get("nombre_emp")
+        src_val = mapa_src_resumen.get("valor")
+
         for _, row in df_resumen.iterrows():
-            row_str = " ".join(str(v).upper() for v in row.values)
-            if "NOMBRECOMPLETO" in row_str or "CEDULA" in row_str or "SALARIO NETO" in row_str:
+            cid  = row.get(src_id)  if src_id  else None
+            cnom = row.get(src_nom) if src_nom else None
+            cval = row.get(src_val) if src_val else None
+
+            if cid is None or (isinstance(cid, float) and pd.isna(cid)):
                 continue
-            filas_validas.append(row)
-        df_resumen_limpio = (pd.DataFrame(filas_validas)
-                             if filas_validas
-                             else pd.DataFrame(columns=df_resumen.columns))
-        n_sn = min(len(df_resumen_limpio), len(filas_sn))
-        for i in range(n_sn):
-            fila_excel = filas_sn[i]
-            row = df_resumen_limpio.iloc[i]
-            for clave, src_col in mapa_src_resumen.items():
-                dst_col = mapa_dst_resumen.get(clave)
-                if not src_col or not dst_col:
-                    continue
-                cn = col_idx.get(dst_col)
-                if cn is None:
-                    continue
-                val = row.get(src_col)
-                if isinstance(val, float) and pd.isna(val):
-                    val = None
-                ws.cell(fila_excel, cn, value=val)
+            str_id = str(cid).strip().upper()
+            if str_id in ("", "ID", "TOTAL GENERAL", "CONCEPTO", "CODIGOLIQUIDACION"):
+                continue
+            if cval is None or (isinstance(cval, float) and pd.isna(cval)):
+                continue
+
+            fila_excel = fila_sn_inicio + idx_sn
+
+            if cn_cod_dina: ws.cell(fila_excel, cn_cod_dina, value="SN")
+            if cn_cod_hel:  ws.cell(fila_excel, cn_cod_hel,  value="SN")
+            if cn_ced:      ws.cell(fila_excel, cn_ced,      value=cid)
+            if cn_nom:      ws.cell(fila_excel, cn_nom,      value=cnom)
+            if cn_val:      ws.cell(fila_excel, cn_val,      value=cval)
+
+            idx_sn += 1
             n_sn_escritas += 1
-        if len(df_resumen_limpio) > len(filas_sn):
-            warns.append(
-                f"Nomina resumen tiene {len(df_resumen_limpio)} filas válidas "
-                f"pero solo hay {len(filas_sn)} filas SN en el 3.2."
-            )
+
+        if idx_sn > 0:
+            ultima_escrita = fila_sn_inicio + idx_sn - 1
 
     # COLUMNAS CALCULADAS
-    if modo in ("valores", "formulas") and ultima_dato >= primera_dato:
+    tot_debito = 0.0
+    tot_credito = 0.0
+
+    if modo in ("valores", "formulas") and ultima_escrita >= primera_dato:
         fila_ref = primera_dato
-        for fe in range(primera_dato + 1, ultima_dato + 1):
+        for fe in range(primera_dato + 1, ultima_escrita + 1):
             for c in range(1, ws.max_column + 1):
                 ws.cell(fe, c)._style = copy(ws.cell(fila_ref, c)._style)
 
         if modo == "formulas":
-            for fe in range(primera_dato, ultima_dato + 1):
+            for fe in range(primera_dato, ultima_escrita + 1):
                 for c, f in formulas_fila(fe).items():
                     ws.cell(fe, c, value=f)
         else:  # valores
             hom, cc, ter = construir_lookups(raw_32)
-            for fe in range(primera_dato, ultima_dato + 1):
+            for fe in range(primera_dato, ultima_escrita + 1):
                 B = ws.cell(fe, 2).value
                 D = ws.cell(fe, 4).value
                 E = ws.cell(fe, 5).value
@@ -427,16 +441,21 @@ def ejecutar_traslado_doble(
                 for c, v in vals.items():
                     ws.cell(fe, c, value=v)
 
-        # Limpiar residuos de la plantilla por debajo de la última fila escrita
-        for fe in range(ultima_dato + 1, ws.max_row + 1):
+                v_deb  = vals.get(14) or 0
+                v_cred = vals.get(15) or 0
+                tot_debito += v_deb
+                tot_credito += v_cred
+
+        # Limpiar residuos por debajo de la última fila escrita
+        for fe in range(ultima_escrita + 1, ws.max_row + 1):
             for c in COLS_CALC:
                 if ws.cell(fe, c).value is not None:
                     ws.cell(fe, c, value=None)
 
-    # ── AUTOCHEQUEO: cuántas filas de datos quedaron sin Vr Débito Y Crédito ──
+    # ── AUTOCHEQUEO ──
     sin_calc = 0
     if modo in ("valores", "formulas"):
-        for fe in range(primera_dato, ultima_dato + 1):
+        for fe in range(primera_dato, ultima_escrita + 1):
             if ws.cell(fe, 2).value in (None, ""):
                 continue
             n_val = ws.cell(fe, 14).value
@@ -446,7 +465,7 @@ def ejecutar_traslado_doble(
 
     buf = io.BytesIO()
     wb.save(buf)
-    return buf.getvalue(), n_ok, n_sn_escritas, ultima_dato, warns, sin_calc
+    return buf.getvalue(), n_ok, n_sn_escritas, ultima_escrita, warns, sin_calc, tot_debito, tot_credito
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -580,7 +599,7 @@ if f33 and f32:
                             "valor": m32["valor"]}
 
         with st.spinner("Procesando traslado y calculando columnas..."):
-            resultado, n_ok, n_sn, ultima, warns, sin_calc = ejecutar_traslado_doble(
+            resultado, n_ok, n_sn, ultima, warns, sin_calc, tot_deb, tot_cred = ejecutar_traslado_doble(
                 raw_32, hoja_32, hr_32,
                 df_datos, mapa_src_datos, mapa_dst_datos,
                 df_resumen, mapa_src_resumen, mapa_dst_resumen,
@@ -590,6 +609,7 @@ if f33 and f32:
         st.session_state["traslado_resultado"] = {
             "bytes": resultado, "n_ok": n_ok, "n_sn": n_sn, "ultima": ultima,
             "warns": warns, "sin_calc": sin_calc, "hoja": hoja_32, "modo": modo,
+            "tot_deb": tot_deb, "tot_cred": tot_cred,
             "version": APP_VERSION,
             "nombre": f"3_2_actualizado_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
         }
@@ -605,12 +625,36 @@ if f33 and f32:
                 for w in res["warns"]:
                     st.warning(w)
 
-        # ── AUTOCHEQUEO visible: debe ser 0 ──
-        cM, cT = st.columns(2)
-        
+        # ── METRICAS DE CUADRE CONTABLE DÉBITO VS CRÉDITO ──
+        c1, c2, c3 = st.columns(3)
+        tot_deb  = res.get("tot_deb", 0.0)
+        tot_cred = res.get("tot_cred", 0.0)
+        diff     = tot_deb - tot_cred
+
+        with c1:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="label">Total Vr Débito (Col N)</div>
+                <div class="number blue">${tot_deb:,.2f}</div>
+            </div>""", unsafe_allow_html=True)
+        with c2:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="label">Total Vr Crédito (Col O)</div>
+                <div class="number blue">${tot_cred:,.2f}</div>
+            </div>""", unsafe_allow_html=True)
+        with c3:
+            color_class = "green" if abs(diff) < 0.01 else "red"
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="label">Diferencia (Débito - Crédito)</div>
+                <div class="number {color_class}">${diff:,.2f}</div>
+            </div>""", unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
 
         if res.get("sin_calc", 0) == 0:
-            st.success(f"✅ {res['n_ok']} filas DATOS · {res['n_sn']} filas SN · "
+            st.success(f"✅ {res['n_ok']} filas DATOS · {res['n_sn']} filas SN (Nomina resumen) · "
                        f"Vr Débito/Crédito calculados hasta la fila {res['ultima']} "
                        f"en **{res['hoja']}** (build {res['version']}).")
         else:
