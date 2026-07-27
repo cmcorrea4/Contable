@@ -4,7 +4,8 @@ import plotly.graph_objects as go
 import plotly.express as px
 from io import BytesIO
 import openpyxl
-from openpyxl.styles import Font, Alignment, Border, Side
+from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+from openpyxl.utils import get_column_letter
 import datetime
 
 
@@ -209,7 +210,76 @@ def procesar_archivo(file_bytes: bytes):
     totales_eri = {g: pivot_eri.loc[g, "Total general"] if g in pivot_eri.index else 0.0
                    for g in GRUPOS_ERI}
 
-    return df_eri_raw, pivot_eri, df_esf_raw, pivot_esf, saldos_esf, totales_eri, ultimo_mes
+    # Extracción de valores de Patrimonio
+    saldos_patrimonio = {
+        "capital_emitido": 0.0,
+        "superavit_capital": 0.0,
+        "utilidad_acumulada": 0.0,
+        "utilidad_periodo": 0.0,
+        "total_patrimonio": 0.0,
+    }
+
+    if ultimo_mes:
+        df_m = df[df["Mes"] == ultimo_mes].copy()
+        df_m["c_clean"] = df_m["Codigo"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+
+        # Capital emitido (31 / 3105)
+        g_cap = df_m[df_m["Grupo"].astype(str).str.upper().str.contains("CAPITAL EMITIDO|CAPITAL SOCIAL", na=False)]
+        if not g_cap.empty:
+            cap_emitido = abs(g_cap["Saldo Mes"].sum())
+        else:
+            m_31 = df_m[df_m["c_clean"].isin(["31", "3105"])]
+            if not m_31.empty:
+                cap_emitido = abs(m_31["Saldo Mes"].iloc[0])
+            else:
+                m_31_sub = df_m[df_m["c_clean"].str.startswith("31") & (df_m["c_clean"].str.len() >= 6)]
+                cap_emitido = abs(m_31_sub["Saldo Mes"].sum())
+
+        # Superávit de capital (32 / 3205)
+        g_sup = df_m[df_m["Grupo"].astype(str).str.upper().str.contains("SUPERAVIT", na=False)]
+        if not g_sup.empty:
+            superavit_cap = abs(g_sup["Saldo Mes"].sum())
+        else:
+            m_32 = df_m[df_m["c_clean"].isin(["32", "3205"])]
+            if not m_32.empty:
+                superavit_cap = abs(m_32["Saldo Mes"].iloc[0])
+            else:
+                m_32_sub = df_m[df_m["c_clean"].str.startswith("32") & (df_m["c_clean"].str.len() >= 6)]
+                superavit_cap = abs(m_32_sub["Saldo Mes"].sum())
+
+        # Utilidad acumulada (36 / 3605 / 37 / 3705)
+        g_acum = df_m[df_m["Grupo"].astype(str).str.upper().str.contains("UTILIDAD ACUMULADA|RESULTADOS DE EJERCICIOS ANTERIORES", na=False)]
+        if not g_acum.empty:
+            util_acum = abs(g_acum["Saldo Mes"].sum())
+        else:
+            m_36 = df_m[df_m["c_clean"].isin(["37", "3705", "36", "3605"])]
+            if not m_36.empty:
+                util_acum = abs(m_36["Saldo Mes"].iloc[0])
+            else:
+                m_36_sub = df_m[df_m["c_clean"].str.startswith(("36", "37")) & (df_m["c_clean"].str.len() >= 6)]
+                util_acum = abs(m_36_sub["Saldo Mes"].sum())
+
+        # Utilidad del periodo (desde el ERI)
+        ing_ord   = abs(totales_eri.get("INGRESOS DE ACTIVIDADES ORDINARIAS", 0))
+        otros_ing = abs(totales_eri.get("OTROS INGRESOS", 0))
+        gtos_adm  = abs(totales_eri.get("GASTOS DE ADMINISTRACION", 0))
+        otros_gto = abs(totales_eri.get("OTROS GASTOS", 0))
+        ing_fin   = abs(totales_eri.get("INGRESOS FINANCIEROS", 0))
+        gto_fin   = abs(totales_eri.get("GASTOS FINANCIEROS", 0))
+        provision = abs(totales_eri.get("PROVISION DE IMPUESTOS", 0))
+        util_per  = (ing_ord + otros_ing - gtos_adm - otros_gto + ing_fin - gto_fin) - provision
+
+        total_patrimonio = cap_emitido + superavit_cap + util_acum + util_per
+
+        saldos_patrimonio = {
+            "capital_emitido": cap_emitido,
+            "superavit_capital": superavit_cap,
+            "utilidad_acumulada": util_acum,
+            "utilidad_periodo": util_per,
+            "total_patrimonio": total_patrimonio,
+        }
+
+    return df_eri_raw, pivot_eri, df_esf_raw, pivot_esf, saldos_esf, saldos_patrimonio, totales_eri, ultimo_mes
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -238,7 +308,10 @@ def set_val(ws, cell_ref, value, bold=False, size=13, fmt=None,
     if border_bottom == "double": c.border = Border(bottom=double())
 
 
-def generar_hoja_esf(ws, empresa, nit, periodo, saldos):
+def generar_hoja_esf(ws, empresa, nit, periodo, saldos, saldos_patrimonio=None):
+    if saldos_patrimonio is None:
+        saldos_patrimonio = {}
+
     anchos = {"A":4,"B":49.6,"C":6.1,"D":17.7,"E":2.6,"F":17.7,
               "G":2.6,"H":12.1,"I":49.6,"J":6.1,"K":17.7,"L":2.6,"M":17.7,"N":12}
     for col, w in anchos.items():
@@ -355,13 +428,34 @@ def generar_hoja_esf(ws, empresa, nit, periodo, saldos):
 
     # ── Patrimonio (col I/K) ──────────────────────────────────────────────────
     ws["I30"].value = "Patrimonio:"; ws["I30"].font = F(size=13)
-    for r, lbl in [(31,"  Capital emitido"),(32,"  Superávit de capital"),
-                   (33,"  Utilidad acumulada"),(34,"  Utilidad del periodo")]:
+    cap_emitido  = saldos_patrimonio.get("capital_emitido", 0.0)
+    superavit    = saldos_patrimonio.get("superavit_capital", 0.0)
+    util_acum    = saldos_patrimonio.get("utilidad_acumulada", 0.0)
+    util_periodo = saldos_patrimonio.get("utilidad_periodo", 0.0)
+    total_patrimonio = saldos_patrimonio.get("total_patrimonio", cap_emitido + superavit + util_acum + util_periodo)
+
+    patrimonio_map = [
+        (31, "  Capital emitido", cap_emitido),
+        (32, "  Superávit de capital", superavit),
+        (33, "  Utilidad acumulada", util_acum),
+        (34, "  Utilidad del periodo", util_periodo),
+    ]
+
+    for r, lbl, val in patrimonio_map:
         ws[f"I{r}"].value = lbl; ws[f"I{r}"].font = F(size=13); ws[f"I{r}"].alignment = A("left")
+        ws[f"K{r}"].value = val if val != 0 else None
+        ws[f"K{r}"].number_format = FMT_COP_XL
+        ws[f"K{r}"].font = F(size=13)
 
     ws["I36"].value = "TOTAL PATRIMONIO"; ws["I36"].font = F(bold=True, size=14)
+    ws["K36"].value = total_patrimonio if total_patrimonio != 0 else None
+    ws["K36"].number_format = FMT_SUB_XL
+    ws["K36"].font = F(bold=True, size=14)
+    ws["K36"].border = Border(bottom=thin())
+
+    total_pas_patrimonio = total_pas + total_patrimonio
     ws["I38"].value = "TOTAL PASIVOS Y PATRIMONIO"; ws["I38"].font = F(bold=True, size=14)
-    ws["K38"].value = total_pas; ws["K38"].number_format = FMT_COP_XL
+    ws["K38"].value = total_pas_patrimonio; ws["K38"].number_format = FMT_COP_XL
     ws["K38"].font = F(bold=True, size=14); ws["K38"].border = Border(bottom=double())
 
     ws["B40"].value = "Las notas adjuntas forman parte integral de estos estados financieros."
@@ -434,45 +528,189 @@ def generar_hoja_eri(ws, empresa, nit, periodo, totales):
     ws["B31"].font = F(size=12)
 
 
-def _escribir_df_en_hoja(ws, df, index=True):
-    """Escribe un DataFrame en un Worksheet de openpyxl sin pandas ExcelWriter."""
-    from openpyxl.utils import get_column_letter
-    if index:
-        # Encabezado: índice + columnas
-        ws.append([""] + list(df.columns))
-        for row_idx, (idx_val, row) in enumerate(df.iterrows()):
-            ws.append([str(idx_val)] + [
-                float(v) if isinstance(v, (int, float)) and not pd.isna(v) else str(v)
-                for v in row
-            ])
-    else:
-        ws.append(list(df.columns))
-        for _, row in df.iterrows():
-            ws.append([
-                float(v) if isinstance(v, (int, float)) and not pd.isna(v) else str(v)
-                for v in row
-            ])
+def generar_hoja_anexo(ws, title, empresa, df):
+    """Genera hojas de Anexo ESF y ERI con diseño profesional, autofiltros y anchos amplios."""
+    c_header_fill = PatternFill(start_color="1E3A5F", end_color="1E3A5F", fill_type="solid")
+    c_subhead_fill = PatternFill(start_color="2E6DA4", end_color="2E6DA4", fill_type="solid")
+    c_alt_fill     = PatternFill(start_color="F4F8FA", end_color="F4F8FA", fill_type="solid")
+    c_total_fill   = PatternFill(start_color="1E3A5F", end_color="1E3A5F", fill_type="solid")
+
+    font_title  = Font(name="Calibri", size=14, bold=True, color="FFFFFF")
+    font_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    font_data   = Font(name="Calibri", size=11, color="1E3A5F")
+    font_total  = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+
+    border_thin = Border(
+        left=Side(style="thin", color="E2E8F0"),
+        right=Side(style="thin", color="E2E8F0"),
+        top=Side(style="thin", color="E2E8F0"),
+        bottom=Side(style="thin", color="E2E8F0")
+    )
+    border_total = Border(
+        top=Side(style="thin", color="1E3A5F"),
+        bottom=Side(style="double", color="FFFFFF")
+    )
+
+    align_center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    align_left   = Alignment(horizontal="left", vertical="center")
+    align_right  = Alignment(horizontal="right", vertical="center")
+
+    num_cols = len(df.columns) + 1  # 1 para Col A (Grupo)
+    last_col_letter = get_column_letter(num_cols)
+
+    # Fila 1: Banner de Título
+    ws.row_dimensions[1].height = 28.0
+    ws["A1"].value = f"{empresa.upper()} - {title.upper()}"
+    ws["A1"].font  = font_title
+    ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
+
+    for c in range(1, num_cols + 1):
+        cell = ws.cell(row=1, column=c)
+        cell.fill = c_header_fill
+
+    # Fila 2: Separador
+    ws.row_dimensions[2].height = 10.0
+
+    # Fila 4: Cabecera de tabla con Autofiltros
+    ws.row_dimensions[4].height = 26.0
+    headers = ["Grupo"] + list(df.columns)
+    for col_idx, h in enumerate(headers, 1):
+        c = ws.cell(row=4, column=col_idx)
+        c.value = h
+        c.font  = font_header
+        c.fill  = c_subhead_fill
+        c.alignment = align_center
+
+    # Filas de datos desde fila 5
+    for r_idx, (idx_val, row) in enumerate(df.iterrows(), start=5):
+        ws.row_dimensions[r_idx].height = 20.0
+        is_total_row = str(idx_val) in ["Total general", "Total Activo", "Total Pasivo"]
+
+        # Col A: Grupo
+        cA = ws.cell(row=r_idx, column=1)
+        cA.value = str(idx_val)
+        cA.alignment = align_left
+
+        if is_total_row:
+            cA.font   = font_total
+            cA.fill   = c_total_fill
+            cA.border = border_total
+        else:
+            cA.font   = font_data
+            if r_idx % 2 == 0:
+                cA.fill = c_alt_fill
+            cA.border = border_thin
+
+        # Columnas de valores
+        for c_idx, val in enumerate(row, start=2):
+            cell = ws.cell(row=r_idx, column=c_idx)
+            is_num = isinstance(val, (int, float)) and not pd.isna(val)
+            cell.value = float(val) if is_num else (val if not pd.isna(val) else None)
+            cell.number_format = FMT_COP_XL
+            cell.alignment = align_right
+
+            if is_total_row:
+                cell.font   = font_total
+                cell.fill   = c_total_fill
+                cell.border = border_total
+            else:
+                cell.font   = font_data
+                if r_idx % 2 == 0:
+                    cell.fill = c_alt_fill
+                cell.border = border_thin
+
+    # Habilitar Autofiltro en la fila 4
+    max_row = 4 + len(df)
+    ws.auto_filter.ref = f"A4:{last_col_letter}{max_row}"
+
+    # Anchos de columna amplios para legibilidad perfecta de números sin que se corten
+    ws.column_dimensions["A"].width = 68.0
+    for col_idx in range(2, num_cols + 1):
+        col_letter = get_column_letter(col_idx)
+        ws.column_dimensions[col_letter].width = 22.0
 
 
-def generar_excel_eeff(empresa, nit, periodo, saldos_esf, totales_eri,
+def _escribir_df_en_hoja(ws, df, index=False):
+    """Escribe un DataFrame de Detalle con formato, autofiltros y anchos ajustados."""
+    c_subhead_fill = PatternFill(start_color="2E6DA4", end_color="2E6DA4", fill_type="solid")
+    c_alt_fill     = PatternFill(start_color="F4F8FA", end_color="F4F8FA", fill_type="solid")
+
+    font_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    font_data   = Font(name="Calibri", size=10, color="1E3A5F")
+
+    border_thin = Border(
+        left=Side(style="thin", color="E2E8F0"),
+        right=Side(style="thin", color="E2E8F0"),
+        top=Side(style="thin", color="E2E8F0"),
+        bottom=Side(style="thin", color="E2E8F0")
+    )
+
+    align_center = Alignment(horizontal="center", vertical="center")
+    align_left   = Alignment(horizontal="left", vertical="center")
+    align_right  = Alignment(horizontal="right", vertical="center")
+
+    cols = list(df.columns)
+    ws.row_dimensions[1].height = 25.0
+
+    # Header
+    for c_idx, col_name in enumerate(cols, 1):
+        cell = ws.cell(row=1, column=c_idx)
+        cell.value = str(col_name)
+        cell.font  = font_header
+        cell.fill  = c_subhead_fill
+        cell.alignment = align_center
+
+    # Data
+    for r_idx, (_, row) in enumerate(df.iterrows(), start=2):
+        ws.row_dimensions[r_idx].height = 19.0
+        for c_idx, val in enumerate(row, 1):
+            cell = ws.cell(row=r_idx, column=c_idx)
+            col_name = cols[c_idx - 1]
+            if isinstance(val, (int, float)) and not pd.isna(val):
+                cell.value = float(val)
+                if "Saldo" in col_name or "Monto" in col_name or "Valor" in col_name:
+                    cell.number_format = FMT_COP_XL
+                    cell.alignment = align_right
+                else:
+                    cell.alignment = align_left
+            else:
+                cell.value = str(val) if not pd.isna(val) else None
+                cell.alignment = align_left
+
+            cell.font = font_data
+            if r_idx % 2 == 0:
+                cell.fill = c_alt_fill
+            cell.border = border_thin
+
+    # AutoFilter
+    max_col_letter = get_column_letter(len(cols))
+    max_row = 1 + len(df)
+    ws.auto_filter.ref = f"A1:{max_col_letter}{max_row}"
+
+    # Auto Column Widths
+    for c_idx, col_name in enumerate(cols, 1):
+        col_letter = get_column_letter(c_idx)
+        max_len = max(len(str(col_name)), int(df[col_name].astype(str).str.len().max()) if not df.empty else 10)
+        ws.column_dimensions[col_letter].width = min(max(max_len + 4, 15), 55)
+
+
+def generar_excel_eeff(empresa, nit, periodo, saldos_esf, saldos_patrimonio, totales_eri,
                        pivot_eri, df_eri_raw, pivot_esf, df_esf_raw):
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
-    # Hojas formateadas
-    generar_hoja_esf(wb.create_sheet("ESF"), empresa, nit, periodo, saldos_esf)
+    # Hojas formateadas principales
+    generar_hoja_esf(wb.create_sheet("ESF"), empresa, nit, periodo, saldos_esf, saldos_patrimonio)
     generar_hoja_eri(wb.create_sheet("ERI"), empresa, nit, periodo, totales_eri)
 
-    # Hojas de Anexo (pivot mensual) escritas directamente en el worksheet
+    # Hojas de Anexo (pivot mensual) con formato estilizado, autofiltros y anchos amplios
     ws_aesf = wb.create_sheet("Anexo ESF")
-    _escribir_df_en_hoja(ws_aesf, pivot_esf, index=True)
-    ws_aesf.column_dimensions["A"].width = 55
+    generar_hoja_anexo(ws_aesf, "ANEXO AL ESTADO DE LA SITUACIÓN FINANCIERA", empresa, pivot_esf)
 
     ws_aeri = wb.create_sheet("Anexo ERI")
-    _escribir_df_en_hoja(ws_aeri, pivot_eri, index=True)
-    ws_aeri.column_dimensions["A"].width = 55
+    generar_hoja_anexo(ws_aeri, "ANEXO AL ESTADO DE RESULTADOS INTEGRAL", empresa, pivot_eri)
 
-    # Hojas de detalle
+    # Hojas de detalle con formato y autofiltros
     ws_desf = wb.create_sheet("Detalle ESF")
     _escribir_df_en_hoja(ws_desf, df_esf_raw, index=False)
 
@@ -508,7 +746,7 @@ if not uploaded:
     st.stop()
 
 file_bytes = uploaded.read()
-df_eri_raw, pivot_eri, df_esf_raw, pivot_esf, saldos_esf, totales_eri, ultimo_mes = \
+df_eri_raw, pivot_eri, df_esf_raw, pivot_esf, saldos_esf, saldos_patrimonio, totales_eri, ultimo_mes = \
     procesar_archivo(file_bytes)
 
 meses_disp     = [m for m in MESES_ORDEN if m in pivot_eri.columns]
@@ -644,9 +882,10 @@ with tab_esf:
         st.markdown(f"""<div class="metric-card"><div class="number red">{fmt_cop(abs(total_pas_v))}</div>
             <div class="label">Total Pasivo (acumulado)</div></div>""", unsafe_allow_html=True)
     with mc3:
-        pc = "blue" if saldo_act >= saldo_pas else "red"
-        st.markdown(f"""<div class="metric-card"><div class="number {pc}">{fmt_cop(saldo_act-saldo_pas)}</div>
-            <div class="label">Activo − Pasivo ({ultimo_mes})</div></div>""", unsafe_allow_html=True)
+        saldo_pat = saldos_patrimonio.get("total_patrimonio", 0.0)
+        pc = "purple" if saldo_pat >= 0 else "red"
+        st.markdown(f"""<div class="metric-card"><div class="number {pc}">{fmt_cop(saldo_pat)}</div>
+            <div class="label">Total Patrimonio ({ultimo_mes})</div></div>""", unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown('<div class="result-block">', unsafe_allow_html=True)
@@ -725,13 +964,22 @@ with tab_exportar:
     c1, c2 = st.columns(2)
     with c1:
         st.markdown(f"**Vista previa ESF — saldo de cierre ({ultimo_mes})**")
-        prev_esf = pd.DataFrame({
-            "Cuenta": [NOMBRE_ESF.get(g,g).strip() for g in GRUPOS_ESF_ORDEN if g in saldos_esf],
-            "Saldo":  [fmt_cop(abs(saldos_esf.get(g,0))) for g in GRUPOS_ESF_ORDEN if g in saldos_esf],
-        })
+        prev_esf_list = [
+            {"Cuenta": NOMBRE_ESF.get(g,g).strip(), "Saldo": fmt_cop(abs(saldos_esf.get(g,0)))}
+            for g in GRUPOS_ESF_ORDEN if g in saldos_esf
+        ]
+        prev_esf_list.append({"Cuenta": "─── PATRIMONIO ───", "Saldo": ""})
+        prev_esf_list.append({"Cuenta": "Capital emitido", "Saldo": fmt_cop(saldos_patrimonio.get("capital_emitido",0))})
+        prev_esf_list.append({"Cuenta": "Superávit de capital", "Saldo": fmt_cop(saldos_patrimonio.get("superavit_capital",0))})
+        prev_esf_list.append({"Cuenta": "Utilidad acumulada", "Saldo": fmt_cop(saldos_patrimonio.get("utilidad_acumulada",0))})
+        prev_esf_list.append({"Cuenta": "Utilidad del periodo", "Saldo": fmt_cop(saldos_patrimonio.get("utilidad_periodo",0))})
+        prev_esf_list.append({"Cuenta": "TOTAL PATRIMONIO", "Saldo": fmt_cop(saldos_patrimonio.get("total_patrimonio",0))})
+
+        prev_esf = pd.DataFrame(prev_esf_list)
         st.dataframe(prev_esf, use_container_width=True, hide_index=True, height=370)
+        tot_pas_pat = saldo_pas + saldos_patrimonio.get("total_patrimonio", 0)
         st.markdown(
-            f"<p><b>Total Activo:</b> {fmt_cop(saldo_act)} &nbsp;|&nbsp; <b>Total Pasivo:</b> {fmt_cop(saldo_pas)}</p>",
+            f"<p><b>Total Activo:</b> {fmt_cop(saldo_act)} &nbsp;|&nbsp; <b>Total Pasivo:</b> {fmt_cop(saldo_pas)} &nbsp;|&nbsp; <b>Pasivo + Patrimonio:</b> {fmt_cop(tot_pas_pat)}</p>",
             unsafe_allow_html=True,
         )
     with c2:
@@ -758,7 +1006,7 @@ with tab_exportar:
         with st.spinner("Generando archivo Excel…"):
             buf_eeff = generar_excel_eeff(
                 empresa, nit, periodo,
-                saldos_esf, totales_eri,
+                saldos_esf, saldos_patrimonio, totales_eri,
                 pivot_eri, df_eri_raw, pivot_esf, df_esf_raw,
             )
         st.success("✅ Archivo generado — 6 hojas: ESF, ERI, Anexo ESF, Anexo ERI, Detalle ESF, Detalle ERI")
@@ -770,4 +1018,5 @@ with tab_exportar:
             use_container_width=True,
         )
     st.markdown('</div>', unsafe_allow_html=True)
+
 
