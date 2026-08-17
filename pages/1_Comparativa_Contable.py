@@ -138,6 +138,75 @@ def cargar_extracto(archivo) -> tuple:
     return col_i.reset_index(drop=True), desc_col.reset_index(drop=True)
 
 
+def cargar_extracto_formato2(archivo) -> tuple:
+    """
+    Lee el extracto bancario en el formato "banco" (con bloques de
+    metadatos arriba y tabla de movimientos con encabezados reales:
+    FECHA | DESCRIPCIÓN | SUCURSAL | DCTO. | VALOR | SALDO).
+
+    Detecta automáticamente la fila de encabezados y limpia los valores
+    numéricos (vienen como texto con comas, ej. "12,069,906.60").
+
+    Devuelve la misma estructura que cargar_extracto():
+      - col_i    : valores numéricos de la columna VALOR
+      - desc_col : descripciones de la columna DESCRIPCIÓN
+    """
+    contenido = archivo.read()
+    df_raw = pd.read_excel(io.BytesIO(contenido), sheet_name=0, header=None)
+
+    header_row = None
+    for i, row in df_raw.iterrows():
+        vals = [str(v).strip().lower() for v in row.values]
+        tiene_desc = any("descrip" in v for v in vals)
+        tiene_valor = any("valor" in v and "saldo" not in v for v in vals)
+        if tiene_desc and tiene_valor:
+            header_row = i
+            break
+
+    if header_row is None:
+        st.error(
+            "No se encontró la fila de encabezados (FECHA / DESCRIPCIÓN / VALOR) "
+            "en el Excel del extracto."
+        )
+        return None, None
+
+    df = df_raw.iloc[header_row + 1:].copy()
+    df.columns = [str(c).strip() for c in df_raw.iloc[header_row].values]
+
+    col_desc = next((c for c in df.columns if "descrip" in c.lower()), None)
+    col_valor = next(
+        (c for c in df.columns if "valor" in c.lower() and "saldo" not in c.lower()),
+        None,
+    )
+
+    if not col_desc or not col_valor:
+        st.error(
+            f"No se encontraron columnas Descripción/Valor. "
+            f"Columnas disponibles: {list(df.columns)}"
+        )
+        return None, None
+
+    desc_col = df[col_desc].fillna("").astype(str).str.strip()
+
+    valor_raw = (
+        df[col_valor]
+        .astype(str)
+        .str.replace(",", "", regex=False)
+        .str.replace(" ", "", regex=False)
+    )
+    col_i = pd.to_numeric(valor_raw, errors="coerce")
+
+    # Excluir filas sin valor numérico (pies de página, separadores, etc.)
+    # y filas de saldo que no son transacciones reales
+    desc_upper = desc_col.str.upper()
+    mask_valido = col_i.notna() & ~desc_upper.str.startswith("SALDO") & (desc_col != "")
+
+    col_i = col_i[mask_valido]
+    desc_col = desc_col[mask_valido]
+
+    return col_i.reset_index(drop=True), desc_col.reset_index(drop=True)
+
+
 def cargar_excel(archivo) -> tuple:
     """
     Lee el libro contable Excel.
@@ -312,6 +381,22 @@ with col1:
         "Subir extracto", type=["csv", "txt", "xlsx", "xls"],
         key="csv", label_visibility="collapsed"
     )
+
+    formato_extracto = "clasico"
+    if archivo_csv is not None:
+        nombre_csv_check = archivo_csv.name.lower()
+        es_excel_csv = nombre_csv_check.endswith(".xlsx") or nombre_csv_check.endswith(".xls")
+        if es_excel_csv:
+            formato_extracto = st.radio(
+                "Formato del extracto:",
+                ["clasico", "banco"],
+                format_func=lambda x: (
+                    "📑 Formato clásico (columna I)" if x == "clasico"
+                    else "🏦 Formato banco (con encabezados FECHA/DESCRIPCIÓN/VALOR)"
+                ),
+                horizontal=False,
+                key="formato_extracto",
+            )
     st.markdown('</div>', unsafe_allow_html=True)
 
 with col2:
@@ -339,7 +424,14 @@ with st.expander("⚙️ Opciones avanzadas"):
 # ── Procesamiento ────────────────────────────────────────────────────────────
 if archivo_csv and archivo_xlsx:
     with st.spinner("Procesando archivos..."):
-        serie_csv, desc_csv = cargar_extracto(archivo_csv)
+        nombre_csv_actual = archivo_csv.name.lower()
+        es_excel_csv_actual = nombre_csv_actual.endswith(".xlsx") or nombre_csv_actual.endswith(".xls")
+
+        if es_excel_csv_actual and formato_extracto == "banco":
+            serie_csv, desc_csv = cargar_extracto_formato2(archivo_csv)
+        else:
+            serie_csv, desc_csv = cargar_extracto(archivo_csv)
+
         resultado_excel = cargar_excel(archivo_xlsx)
 
     if serie_csv is None or resultado_excel is None:
