@@ -618,6 +618,141 @@ def generar_hoja_eri(ws, empresa, nit, periodo, totales):
     ws["B31"].font = F(size=12)
 
 
+def generar_hoja_anexo_desplegable(ws, title, empresa, df_raw, grupos_orden, meses_cols):
+    """
+    Genera un Anexo ESF/ERI DESPLEGABLE: una fila resumen (bold) por cada Grupo,
+    con las cuentas de detalle agrupadas debajo usando el 'outline' nativo de
+    Excel (los botones +/- para expandir/colapsar aparecen a la izquierda de
+    las filas). Los grupos sin movimiento en este archivo igual aparecen, en $0.
+    """
+    c_header_fill  = PatternFill(start_color="1E3A5F", end_color="1E3A5F", fill_type="solid")
+    c_subhead_fill = PatternFill(start_color="2E6DA4", end_color="2E6DA4", fill_type="solid")
+    c_grupo_fill   = PatternFill(start_color="D9E6F2", end_color="D9E6F2", fill_type="solid")
+    c_alt_fill     = PatternFill(start_color="F4F8FA", end_color="F4F8FA", fill_type="solid")
+    c_total_fill   = PatternFill(start_color="1E3A5F", end_color="1E3A5F", fill_type="solid")
+
+    font_title  = Font(name="Calibri", size=14, bold=True, color="FFFFFF")
+    font_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    font_grupo  = Font(name="Calibri", size=11, bold=True, color="1E3A5F")
+    font_data   = Font(name="Calibri", size=10.5, color="425466")
+    font_total  = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+
+    border_thin = Border(
+        left=Side(style="thin", color="E2E8F0"), right=Side(style="thin", color="E2E8F0"),
+        top=Side(style="thin", color="E2E8F0"), bottom=Side(style="thin", color="E2E8F0"))
+    border_grupo = Border(top=Side(style="thin", color="1E3A5F"))
+    border_total = Border(top=Side(style="thin", color="1E3A5F"), bottom=Side(style="double", color="FFFFFF"))
+    align_left  = Alignment(horizontal="left", vertical="center")
+    align_right = Alignment(horizontal="right", vertical="center")
+    align_center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    cols = list(meses_cols) + ["Total general"]
+    num_cols = len(cols) + 1  # +1 para columna A (Concepto/Cuenta)
+    last_col_letter = get_column_letter(num_cols)
+
+    # Habilitar el outline con el resumen ARRIBA de los detalles (para que el
+    # Grupo quede visible y las cuentas se desplieguen hacia abajo).
+    ws.sheet_properties.outlinePr.summaryBelow = False
+    ws.sheet_properties.outlinePr.summaryRight = False
+
+    # Fila 1: título
+    ws.row_dimensions[1].height = 28.0
+    ws["A1"].value = f"{empresa.upper()} - {title.upper()}"
+    ws["A1"].font = font_title
+    ws["A1"].alignment = align_left
+    for c in range(1, num_cols + 1):
+        ws.cell(row=1, column=c).fill = c_header_fill
+    ws.row_dimensions[2].height = 10.0
+    ws["A3"].value = "Haz clic en los botones [+] / [-] de la izquierda para desplegar el detalle de cuentas de cada concepto."
+    ws["A3"].font = Font(name="Calibri", size=9.5, italic=True, color="708090")
+
+    # Fila 4: cabecera
+    ws.row_dimensions[4].height = 26.0
+    headers = ["Concepto / Cuenta"] + cols
+    for col_idx, h in enumerate(headers, 1):
+        c = ws.cell(row=4, column=col_idx)
+        c.value = h; c.font = font_header; c.fill = c_subhead_fill; c.alignment = align_center
+
+    # Agregación de detalle por Grupo + Cuenta
+    if not df_raw.empty:
+        det = (df_raw.groupby(["Grupo", "Codigo", "Nombre cuenta", "Mes"], dropna=False)["Saldo Mes"]
+                .sum().reset_index())
+        pivot_det = det.pivot_table(index=["Grupo", "Codigo", "Nombre cuenta"],
+                                     columns="Mes", values="Saldo Mes", fill_value=0)
+        pivot_det = pivot_det.reindex(columns=meses_cols, fill_value=0)
+        pivot_det["Total general"] = pivot_det.sum(axis=1)
+    else:
+        pivot_det = pd.DataFrame(columns=meses_cols + ["Total general"])
+
+    row = 5
+    total_general = pd.Series(0.0, index=cols)
+
+    for grupo in grupos_orden:
+        try:
+            sub = pivot_det.xs(grupo, level="Grupo")
+        except KeyError:
+            sub = pd.DataFrame(columns=cols)
+
+        grupo_vals = sub.sum(axis=0) if not sub.empty else pd.Series(0.0, index=cols)
+        for c in cols:
+            if c not in grupo_vals.index:
+                grupo_vals[c] = 0.0
+        total_general = total_general.add(grupo_vals, fill_value=0)
+
+        # Fila resumen del Grupo (siempre visible, nivel 0)
+        cA = ws.cell(row=row, column=1)
+        cA.value = NOMBRE_ESF.get(grupo, NOMBRE_ERI.get(grupo, grupo)).strip()
+        cA.font = font_grupo; cA.fill = c_grupo_fill; cA.border = border_grupo; cA.alignment = align_left
+        for c_idx, c in enumerate(cols, 2):
+            cell = ws.cell(row=row, column=c_idx)
+            cell.value = abs(float(grupo_vals.get(c, 0)))
+            cell.number_format = FMT_COP_XL; cell.font = font_grupo
+            cell.fill = c_grupo_fill; cell.border = border_grupo; cell.alignment = align_right
+        ws.row_dimensions[row].height = 20.0
+        ws.row_dimensions[row].outlineLevel = 0
+        row += 1
+
+        # Filas de detalle por cuenta (colapsadas por defecto, nivel 1)
+        if not sub.empty:
+            for (codigo, nombre), vals in sub.sort_index(level="Codigo").iterrows():
+                cA = ws.cell(row=row, column=1)
+                cod_txt = str(codigo).rstrip("0").rstrip(".") if isinstance(codigo, float) else str(codigo)
+                cA.value = f"      {cod_txt} · {nombre}"
+                cA.font = font_data; cA.alignment = align_left; cA.border = border_thin
+                if row % 2 == 0: cA.fill = c_alt_fill
+                for c_idx, c in enumerate(cols, 2):
+                    cell = ws.cell(row=row, column=c_idx)
+                    cell.value = abs(float(vals.get(c, 0)))
+                    cell.number_format = FMT_COP_XL; cell.font = font_data
+                    cell.alignment = align_right; cell.border = border_thin
+                    if row % 2 == 0: cell.fill = c_alt_fill
+                ws.row_dimensions[row].height = 18.0
+                ws.row_dimensions[row].outlineLevel = 1
+                ws.row_dimensions[row].hidden = True   # colapsado por defecto
+                row += 1
+
+    # Fila de Total general
+    cA = ws.cell(row=row, column=1)
+    cA.value = "Total general"; cA.font = font_total; cA.fill = c_total_fill
+    cA.border = border_total; cA.alignment = align_left
+    for c_idx, c in enumerate(cols, 2):
+        cell = ws.cell(row=row, column=c_idx)
+        cell.value = abs(float(total_general.get(c, 0)))
+        cell.number_format = FMT_COP_XL; cell.font = font_total
+        cell.fill = c_total_fill; cell.border = border_total; cell.alignment = align_right
+    ws.row_dimensions[row].outlineLevel = 0
+
+    # AutoFilter, anchos
+    max_row = row
+    ws.auto_filter.ref = f"A4:{last_col_letter}{max_row}"
+    ws.column_dimensions["A"].width = 68.0
+    for col_idx in range(2, num_cols + 1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = 22.0
+
+    # Mostrar los botones de agrupación en el borde izquierdo, colapsados
+    ws.sheet_format.outlineLevelRow = 1
+
+
 def generar_hoja_anexo(ws, title, empresa, df):
     """Genera hojas de Anexo ESF y ERI con diseño profesional, autofiltros y anchos amplios."""
     c_header_fill = PatternFill(start_color="1E3A5F", end_color="1E3A5F", fill_type="solid")
@@ -793,12 +928,15 @@ def generar_excel_eeff(empresa, nit, periodo, saldos_esf, saldos_patrimonio, tot
     generar_hoja_esf(wb.create_sheet("ESF"), empresa, nit, periodo, saldos_esf, saldos_patrimonio)
     generar_hoja_eri(wb.create_sheet("ERI"), empresa, nit, periodo, totales_eri)
 
-    # Hojas de Anexo (pivot mensual) con formato estilizado, autofiltros y anchos amplios
+    # Hojas de Anexo — tablas DESPLEGABLES: fila resumen por Grupo con las
+    # cuentas de detalle agrupadas debajo (botones +/- de Excel).
     ws_aesf = wb.create_sheet("Anexo ESF")
-    generar_hoja_anexo(ws_aesf, "ANEXO AL ESTADO DE LA SITUACIÓN FINANCIERA", empresa, pivot_esf)
+    generar_hoja_anexo_desplegable(ws_aesf, "ANEXO AL ESTADO DE LA SITUACIÓN FINANCIERA",
+                                    empresa, df_esf_raw, GRUPOS_ESF_ORDEN, list(pivot_esf.columns[:-1]))
 
     ws_aeri = wb.create_sheet("Anexo ERI")
-    generar_hoja_anexo(ws_aeri, "ANEXO AL ESTADO DE RESULTADOS INTEGRAL", empresa, pivot_eri)
+    generar_hoja_anexo_desplegable(ws_aeri, "ANEXO AL ESTADO DE RESULTADOS INTEGRAL",
+                                    empresa, df_eri_raw, GRUPOS_ERI, list(pivot_eri.columns[:-1]))
 
     # Hojas de detalle con formato y autofiltros
     ws_desf = wb.create_sheet("Detalle ESF")
@@ -1129,4 +1267,6 @@ with tab_exportar:
             key="dl_eeff_btn",
         )
     st.markdown('</div>', unsafe_allow_html=True)
+
+
 
