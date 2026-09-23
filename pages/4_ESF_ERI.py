@@ -766,8 +766,10 @@ def generar_hoja_anexo_desplegable(ws, title, empresa, df_raw, grupos_orden, mes
     align_center = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     cols = list(meses_cols) + ["Total general"]
-    num_cols = len(cols) + 1  # +1 para columna A (Concepto/Cuenta)
+    num_cols = len(cols) + 3  # Grupo, Nombre cuenta, Nombre tercero + meses
     last_col_letter = get_column_letter(num_cols)
+    COL_GRUPO, COL_CUENTA, COL_TERCERO = 1, 2, 3
+    COL_MESES_INICIO = 4
 
     # Habilitar el outline con el resumen ARRIBA de los detalles (para que el
     # Grupo quede visible y las cuentas se desplieguen hacia abajo).
@@ -776,18 +778,18 @@ def generar_hoja_anexo_desplegable(ws, title, empresa, df_raw, grupos_orden, mes
 
     # Fila 1: título
     ws.row_dimensions[1].height = 28.0
-    ws["A1"].value = f"{empresa.upper()} - {title.upper()}"
-    ws["A1"].font = font_title
-    ws["A1"].alignment = align_left
+    ws.cell(row=1, column=1).value = f"{empresa.upper()} - {title.upper()}"
+    ws.cell(row=1, column=1).font = font_title
+    ws.cell(row=1, column=1).alignment = align_left
     for c in range(1, num_cols + 1):
         ws.cell(row=1, column=c).fill = c_header_fill
     ws.row_dimensions[2].height = 10.0
-    ws["A3"].value = "Haz clic en los botones [+] / [-] de la izquierda para desplegar el detalle de cuentas de cada concepto."
-    ws["A3"].font = Font(name="Calibri", size=9.5, italic=True, color="708090")
+    ws.cell(row=3, column=1).value = "Haz clic en los botones [+] / [-] de la izquierda para desplegar el detalle de cuentas y terceros de cada concepto."
+    ws.cell(row=3, column=1).font = Font(name="Calibri", size=9.5, italic=True, color="708090")
 
     # Fila 4: cabecera
     ws.row_dimensions[4].height = 26.0
-    headers = ["Concepto / Cuenta"] + cols
+    headers = ["Grupo", "Nombre cuenta", "Nombre tercero"] + cols
     for col_idx, h in enumerate(headers, 1):
         c = ws.cell(row=4, column=col_idx)
         c.value = h; c.font = font_header; c.fill = c_subhead_fill; c.alignment = align_center
@@ -828,11 +830,14 @@ def generar_hoja_anexo_desplegable(ws, title, empresa, df_raw, grupos_orden, mes
         total_general = total_general.add(grupo_vals, fill_value=0)
 
         # Fila resumen del Grupo (siempre visible, nivel 0)
-        cA = ws.cell(row=row, column=1)
+        cA = ws.cell(row=row, column=COL_GRUPO)
         cA.value = NOMBRE_ESF.get(grupo, NOMBRE_ERI.get(grupo, grupo)).strip()
         cA.font = font_grupo; cA.fill = c_grupo_fill; cA.border = border_grupo; cA.alignment = align_left
-        for c_idx, c in enumerate(cols, 2):
-            cell = ws.cell(row=row, column=c_idx)
+        for c_idx in (COL_CUENTA, COL_TERCERO):
+            ws.cell(row=row, column=c_idx).fill = c_grupo_fill
+            ws.cell(row=row, column=c_idx).border = border_grupo
+        for i, c in enumerate(cols):
+            cell = ws.cell(row=row, column=COL_MESES_INICIO + i)
             cell.value = abs(float(grupo_vals.get(c, 0)))
             cell.number_format = FMT_COP_XL; cell.font = font_grupo
             cell.fill = c_grupo_fill; cell.border = border_grupo; cell.alignment = align_right
@@ -851,11 +856,14 @@ def generar_hoja_anexo_desplegable(ws, title, empresa, df_raw, grupos_orden, mes
             cod_txt = str(codigo).rstrip("0").rstrip(".") if isinstance(codigo, float) else str(codigo)
 
             # Fila CUENTA (siempre visible, nivel 1 — el ⊟/⊞ despliega los terceros)
-            cA = ws.cell(row=row, column=1)
-            cA.value = f"    {cod_txt} · {nombre}"
-            cA.font = font_cuenta; cA.alignment = align_left; cA.border = border_thin
-            for c_idx, c in enumerate(cols, 2):
-                cell = ws.cell(row=row, column=c_idx)
+            ws.cell(row=row, column=COL_CUENTA).value = f"{cod_txt} · {nombre}"
+            ws.cell(row=row, column=COL_CUENTA).font = font_cuenta
+            ws.cell(row=row, column=COL_CUENTA).alignment = align_left
+            ws.cell(row=row, column=COL_CUENTA).border = border_thin
+            ws.cell(row=row, column=COL_GRUPO).border = border_thin
+            ws.cell(row=row, column=COL_TERCERO).border = border_thin
+            for i, c in enumerate(cols):
+                cell = ws.cell(row=row, column=COL_MESES_INICIO + i)
                 cell.value = abs(float(sub_cuenta[c].sum())) if c in sub_cuenta.columns else 0.0
                 cell.number_format = FMT_COP_XL; cell.font = font_cuenta
                 cell.alignment = align_right; cell.border = border_thin
@@ -863,15 +871,20 @@ def generar_hoja_anexo_desplegable(ws, title, empresa, df_raw, grupos_orden, mes
             ws.row_dimensions[row].outlineLevel = 1
             row += 1
 
-            # Filas TERCERO (colapsadas por defecto, nivel 2)
+            # Filas TERCERO (colapsadas por defecto, nivel 2) — el nombre del
+            # tercero va en su propia columna, junto a la cuenta a la que pertenece
             for tercero, vals in sub_cuenta.iterrows():
-                nombre_t = str(tercero)
-                cA = ws.cell(row=row, column=1)
-                cA.value = f"        {nombre_t}"
-                cA.font = font_data; cA.alignment = align_left; cA.border = border_thin
-                if row % 2 == 0: cA.fill = c_alt_fill
-                for c_idx, c in enumerate(cols, 2):
-                    cell = ws.cell(row=row, column=c_idx)
+                ws.cell(row=row, column=COL_CUENTA).value = nombre
+                ws.cell(row=row, column=COL_CUENTA).font = font_data
+                ws.cell(row=row, column=COL_CUENTA).alignment = align_left
+                ws.cell(row=row, column=COL_TERCERO).value = str(tercero)
+                ws.cell(row=row, column=COL_TERCERO).font = font_data
+                ws.cell(row=row, column=COL_TERCERO).alignment = align_left
+                for c_idx in (COL_GRUPO, COL_CUENTA, COL_TERCERO):
+                    ws.cell(row=row, column=c_idx).border = border_thin
+                    if row % 2 == 0: ws.cell(row=row, column=c_idx).fill = c_alt_fill
+                for i, c in enumerate(cols):
+                    cell = ws.cell(row=row, column=COL_MESES_INICIO + i)
                     cell.value = abs(float(vals.get(c, 0)))
                     cell.number_format = FMT_COP_XL; cell.font = font_data
                     cell.alignment = align_right; cell.border = border_thin
@@ -882,11 +895,13 @@ def generar_hoja_anexo_desplegable(ws, title, empresa, df_raw, grupos_orden, mes
                 row += 1
 
             # Fila "Total <cuenta>" (siempre visible, nivel 1, subtotal de la cuenta)
-            cA = ws.cell(row=row, column=1)
-            cA.value = f"    Total {nombre}"
-            cA.font = font_total_cuenta; cA.alignment = align_left; cA.border = border_thin
-            for c_idx, c in enumerate(cols, 2):
-                cell = ws.cell(row=row, column=c_idx)
+            ws.cell(row=row, column=COL_CUENTA).value = f"Total {nombre}"
+            ws.cell(row=row, column=COL_CUENTA).font = font_total_cuenta
+            ws.cell(row=row, column=COL_CUENTA).alignment = align_left
+            for c_idx in (COL_GRUPO, COL_CUENTA, COL_TERCERO):
+                ws.cell(row=row, column=c_idx).border = border_thin
+            for i, c in enumerate(cols):
+                cell = ws.cell(row=row, column=COL_MESES_INICIO + i)
                 cell.value = abs(float(sub_cuenta[c].sum())) if c in sub_cuenta.columns else 0.0
                 cell.number_format = FMT_COP_XL; cell.font = font_total_cuenta
                 cell.alignment = align_right; cell.border = border_thin
@@ -895,11 +910,14 @@ def generar_hoja_anexo_desplegable(ws, title, empresa, df_raw, grupos_orden, mes
             row += 1
 
     # Fila de Total general
-    cA = ws.cell(row=row, column=1)
-    cA.value = "Total general"; cA.font = font_total; cA.fill = c_total_fill
-    cA.border = border_total; cA.alignment = align_left
-    for c_idx, c in enumerate(cols, 2):
-        cell = ws.cell(row=row, column=c_idx)
+    ws.cell(row=row, column=COL_GRUPO).value = "Total general"
+    ws.cell(row=row, column=COL_GRUPO).font = font_total
+    for c_idx in (COL_GRUPO, COL_CUENTA, COL_TERCERO):
+        ws.cell(row=row, column=c_idx).fill = c_total_fill
+        ws.cell(row=row, column=c_idx).border = border_total
+    ws.cell(row=row, column=COL_GRUPO).alignment = align_left
+    for i, c in enumerate(cols):
+        cell = ws.cell(row=row, column=COL_MESES_INICIO + i)
         cell.value = abs(float(total_general.get(c, 0)))
         cell.number_format = FMT_COP_XL; cell.font = font_total
         cell.fill = c_total_fill; cell.border = border_total; cell.alignment = align_right
@@ -908,9 +926,11 @@ def generar_hoja_anexo_desplegable(ws, title, empresa, df_raw, grupos_orden, mes
     # AutoFilter, anchos
     max_row = row
     ws.auto_filter.ref = f"A4:{last_col_letter}{max_row}"
-    ws.column_dimensions["A"].width = 68.0
-    for col_idx in range(2, num_cols + 1):
-        ws.column_dimensions[get_column_letter(col_idx)].width = 22.0
+    ws.column_dimensions["A"].width = 34.0
+    ws.column_dimensions["B"].width = 44.0
+    ws.column_dimensions["C"].width = 34.0
+    for col_idx in range(4, num_cols + 1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = 20.0
 
     # Mostrar los botones de agrupación en el borde izquierdo, colapsados
     ws.sheet_format.outlineLevelRow = 1
@@ -1082,91 +1102,242 @@ def _escribir_df_en_hoja(ws, df, index=False):
         ws.column_dimensions[col_letter].width = min(max(max_len + 4, 15), 55)
 
 
-def generar_hoja_consolidado(ws, empresa, nit, pivot_eri, totales_eri, meses_d):
+def generar_hoja_consol(ws, empresa, nit, df_eri_raw, meses_d):
     """
-    Hoja 'Consolidado': la misma información de la hoja ERI, pero con una
-    columna por cada mes (en vez de un único acumulado) más una columna final
-    "Acumulado" que debe coincidir exactamente con el total que se presenta en
-    la hoja ERI.
+    Hoja 'CONSOL': réplica de la plantilla de referencia — detalle de gastos
+    por CUENTA (no por tercero) y por mes, en dos bloques: "GASTOS DE
+    ADMINISTRACIÓN" (incluye Gastos de venta) y "GASTOS NO OPERACIONALES"
+    (financieros + otros gastos + diferencia en cambio), con su subtotal cada
+    uno y un total general "TOTAL COSTOS Y GASTOS DE LA CIA." al final.
+    Incluye columnas ACUMULADO y PROMEDIO.
+    """
+    c_header_fill  = PatternFill(start_color="1E3A5F", end_color="1E3A5F", fill_type="solid")
+    c_subhead_fill = PatternFill(start_color="2E6DA4", end_color="2E6DA4", fill_type="solid")
+    c_seccion_fill = PatternFill(start_color="D9E6F2", end_color="D9E6F2", fill_type="solid")
+    c_total_fill   = PatternFill(start_color="D9E6F2", end_color="D9E6F2", fill_type="solid")
+    font_title  = Font(name="Calibri", size=14, bold=True, color="FFFFFF")
+    font_header = Font(name="Calibri", size=10.5, bold=True, color="FFFFFF")
+    font_data   = Font(name="Calibri", size=10, color="1E3A5F")
+    font_seccion= Font(name="Calibri", size=11, bold=True, color="1E3A5F")
+    font_total  = Font(name="Calibri", size=10.5, bold=True, color="1E3A5F")
+    border_thin = Border(bottom=Side(style="thin", color="8AA4C0"))
+    align_left  = Alignment(horizontal="left", vertical="center")
+    align_right = Alignment(horizontal="right", vertical="center")
+    align_center= Alignment(horizontal="center", vertical="center")
+
+    MESES_CORTO = {"ENERO":"ENE","FEBRERO":"FEB","MARZO":"MAR","ABRIL":"ABR","MAYO":"MAY",
+                   "JUNIO":"JUN","JULIO":"JUL","AGOSTO":"AGO","SEPTIEMBRE":"SEP",
+                   "OCTUBRE":"OCT","NOVIEMBRE":"NOV","DICIEMBRE":"DIC"}
+    cols = list(meses_d) + ["ACUMULADO", "PROMEDIO"]
+    num_cols = len(cols) + 1  # + Concepto
+    last_col = get_column_letter(num_cols)
+
+    ws.row_dimensions[2].height = 22.0
+    ws["B2"].value = f"ANEXOS DEL ESTADO DE RESULTADOS - CONSOLIDADO — {empresa.upper()}"
+    ws["B2"].font = font_title
+    for c in range(1, num_cols + 1):
+        ws.cell(row=2, column=c).fill = c_header_fill
+
+    ws.row_dimensions[4].height = 20.0
+    headers = [None] + [MESES_CORTO.get(m, m) for m in meses_d] + ["ACUMULADO", "PROMEDIO"]
+    for c_idx, h in enumerate(headers, 1):
+        if h is None: continue
+        c = ws.cell(row=4, column=c_idx)
+        c.value = h; c.font = font_header; c.fill = c_subhead_fill; c.alignment = align_center
+
+    def detalle_por_cuenta(grupos):
+        sub = df_eri_raw[df_eri_raw["Grupo"].isin(grupos)]
+        if sub.empty:
+            return pd.DataFrame(columns=meses_d + ["ACUMULADO", "PROMEDIO"])
+        det = sub.groupby(["Codigo", "Nombre cuenta", "Mes"], dropna=False)["Saldo Mes"].sum().reset_index()
+        piv = det.pivot_table(index=["Codigo", "Nombre cuenta"], columns="Mes",
+                               values="Saldo Mes", fill_value=0)
+        piv = piv.reindex(columns=meses_d, fill_value=0)
+        piv["ACUMULADO"] = piv.sum(axis=1)
+        piv["PROMEDIO"] = piv["ACUMULADO"] / max(len(meses_d), 1)
+        return piv
+
+    secciones = [
+        ("GASTOS DE ADMINISTRACIÓN", ["GASTOS DE ADMINISTRACION", "GASTOS DE VENTA"],
+         "TOTAL GASTOS DE ADMINISTRACIÓN "),
+        ("GASTOS NO OPERACIONALES",
+         ["GASTOS FINANCIEROS", "OTROS GASTOS", "DIFERENCIA EN CAMBIO NETA", "OTROS GASTOS SIN CLASIFICAR"],
+         "TOTAL  GTOS NO OPERACIONALES"),
+    ]
+
+    r = 5
+    total_general = pd.Series(0.0, index=cols)
+    for titulo_seccion, grupos, titulo_total in secciones:
+        ws.cell(row=r, column=1).value = titulo_seccion
+        ws.cell(row=r, column=1).font = font_seccion
+        for c in range(1, num_cols + 1): ws.cell(row=r, column=c).fill = c_seccion_fill
+        r += 2
+
+        piv = detalle_por_cuenta(grupos)
+        seccion_total = pd.Series(0.0, index=cols)
+        for (codigo, nombre), vals in piv.iterrows():
+            cod_txt = str(codigo).rstrip("0").rstrip(".") if isinstance(codigo, float) else str(codigo)
+            ws.cell(row=r, column=1).value = f"{cod_txt}  {nombre}"
+            ws.cell(row=r, column=1).font = font_data
+            for i, c in enumerate(cols):
+                v = abs(float(vals.get(c, 0)))
+                ws.cell(row=r, column=2 + i).value = v
+                ws.cell(row=r, column=2 + i).number_format = FMT_COP_XL
+                ws.cell(row=r, column=2 + i).font = font_data
+                ws.cell(row=r, column=2 + i).alignment = align_right
+                seccion_total[c] += v
+            r += 1
+        total_general = total_general.add(seccion_total, fill_value=0)
+
+        ws.cell(row=r, column=1).value = titulo_total
+        ws.cell(row=r, column=1).font = font_total
+        ws.cell(row=r, column=1).border = border_thin
+        for i, c in enumerate(cols):
+            cell = ws.cell(row=r, column=2 + i)
+            cell.value = seccion_total[c]; cell.number_format = FMT_COP_XL
+            cell.font = font_total; cell.alignment = align_right; cell.border = border_thin
+            cell.fill = c_total_fill
+        ws.cell(row=r, column=1).fill = c_total_fill
+        r += 2
+
+    ws.cell(row=r, column=1).value = "TOTAL COSTOS Y GASTOS DE LA CIA."
+    ws.cell(row=r, column=1).font = font_seccion
+    ws.cell(row=r, column=1).border = border_thin
+    for i, c in enumerate(cols):
+        cell = ws.cell(row=r, column=2 + i)
+        cell.value = total_general[c]; cell.number_format = FMT_COP_XL
+        cell.font = font_seccion; cell.alignment = align_right; cell.border = border_thin
+
+    ws.column_dimensions["A"].width = 42.0
+    for c_idx in range(2, num_cols + 1):
+        ws.column_dimensions[get_column_letter(c_idx)].width = 15.0
+
+
+def generar_hoja_consolidado(ws, empresa, nit, pivot_eri, totales_eri, meses_d, df_eri_raw):
+    """
+    Hoja 'ER MENSUALIZADO': réplica de la plantilla de referencia — el mismo
+    ERI pero con una columna por mes (no acumulada) más una columna final
+    "ACUMULADO" que coincide exactamente con el total que se presenta en la
+    hoja ERI. Bajo "Ingresos de actividades ordinarias" se listan sus cuentas
+    hoja (igual que en el archivo de referencia).
     """
     c_header_fill  = PatternFill(start_color="1E3A5F", end_color="1E3A5F", fill_type="solid")
     c_subhead_fill = PatternFill(start_color="2E6DA4", end_color="2E6DA4", fill_type="solid")
     c_alt_fill     = PatternFill(start_color="F4F8FA", end_color="F4F8FA", fill_type="solid")
-    c_total_fill   = PatternFill(start_color="1E3A5F", end_color="1E3A5F", fill_type="solid")
+    c_total_fill   = PatternFill(start_color="D9E6F2", end_color="D9E6F2", fill_type="solid")
     font_title  = Font(name="Calibri", size=14, bold=True, color="FFFFFF")
     font_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-    font_data   = Font(name="Calibri", size=11, color="1E3A5F")
+    font_data   = Font(name="Calibri", size=10.5, color="1E3A5F")
     font_sub    = Font(name="Calibri", size=11, bold=True, color="1E3A5F")
-    font_total  = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-    border_thin = Border(bottom=Side(style="thin", color="E2E8F0"))
+    border_thin = Border(bottom=Side(style="thin", color="8AA4C0"))
     align_left  = Alignment(horizontal="left", vertical="center")
     align_right = Alignment(horizontal="right", vertical="center")
     align_center= Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    labels = [
-        (10, "Ingresos de actividades ordinarias", False),
-        (11, "Costo de ventas", False),
-        (12, "Ganancia bruta", True),
-        (13, "Gastos de venta", False),
-        (14, "Otros ingresos", False),
-        (15, "Gastos de administración", False),
-        (16, "Otros gastos", False),
-        (17, "Ingresos financieros", False),
-        (18, "Gastos financieros", False),
-        (19, "Diferencia en cambio neta", False),
-        (20, "Otros ingresos sin clasificar", False),
-        (21, "Otros gastos sin clasificar", False),
-        (22, "Utilidad antes de impuesto", True),
-        (24, "Ingreso (gasto) por impuesto", False),
-        (26, "Utilidad (pérdida) del periodo", True),
-    ]
-    cols = list(meses_d) + ["Acumulado"]
-    num_cols = len(cols) + 1
+    MESES_LARGO = {"ENERO":"ENERO ","FEBRERO":"FEBRERO ","MARZO":"MARZO","ABRIL":"ABRIL",
+                   "MAYO":"MAYO","JUNIO":"JUNIO","JULIO":"JULIO","AGOSTO":"AGOSTO",
+                   "SEPTIEMBRE":"SEPTIEMBRE","OCTUBRE":"OCTUBRE","NOVIEMBRE":"NOVIEMBRE ",
+                   "DICIEMBRE":"DICIEMBRE"}
+    cols = list(meses_d) + ["ACUMULADO"]
+    num_cols = len(cols) + 2  # Codigo + Concepto
     last_col = get_column_letter(num_cols)
 
-    ws.row_dimensions[1].height = 28.0
-    ws["A1"].value = f"{empresa.upper()} - CONSOLIDADO MENSUAL (ERI)"
-    ws["A1"].font = font_title
+    ws.row_dimensions[1].height = 20.0
+    ws["B1"].value = empresa.upper(); ws["B1"].font = Font(name="Calibri", size=12, bold=True, color="1E3A5F")
+    ws.row_dimensions[2].height = 22.0
+    ws["B2"].value = "ESTADO DE RESULTADOS INTEGRAL  MENSUALIZADO - CONSOLIDADO"
+    ws["B2"].font = font_title
     for c in range(1, num_cols + 1):
-        ws.cell(row=1, column=c).fill = c_header_fill
-    ws.row_dimensions[2].height = 10.0
-    ws["A3"].value = ("El total de la columna 'Acumulado' coincide con el total presentado "
-                       "en la hoja ERI (no es una suma de saldos acumulados mes a mes).")
-    ws["A3"].font = Font(italic=True, size=9.5, color="708090")
+        ws.cell(row=2, column=c).fill = c_header_fill
 
-    ws.row_dimensions[4].height = 24.0
-    headers = ["Concepto"] + [MESES_ABREV.get(m, m) for m in meses_d] + ["Acumulado"]
+    ws.row_dimensions[5].height = 24.0
+    headers = [None, None] + [MESES_LARGO.get(m, m) for m in meses_d] + ["ACUMULADO"]
     for c_idx, h in enumerate(headers, 1):
-        c = ws.cell(row=4, column=c_idx)
+        if h is None: continue
+        c = ws.cell(row=5, column=c_idx)
         c.value = h; c.font = font_header; c.fill = c_subhead_fill; c.alignment = align_center
 
-    # Totales por Grupo y mes (columna) + acumulado (usa totales_eri, igual que la hoja ERI)
+    # Totales por Grupo y por mes (columna) + acumulado (usa totales_eri, igual que la hoja ERI)
     totales_por_col = {}
     for mes in meses_d:
         totales_por_col[mes] = {g: (pivot_eri.loc[g, mes] if g in pivot_eri.index else 0.0) for g in GRUPOS_ERI}
-    totales_por_col["Acumulado"] = totales_eri
-    vals_por_col = {col: _calc_lineas_eri(t) for col, t in totales_por_col.items()}
+    totales_por_col["ACUMULADO"] = totales_eri
+    vals = {col: _calc_lineas_eri(t) for col, t in totales_por_col.items()}
 
-    for r_idx, (row_key, label, bold) in enumerate(labels, start=5):
-        ws.row_dimensions[r_idx].height = 19.0
-        cA = ws.cell(row=r_idx, column=1)
-        cA.value = label; cA.font = (font_sub if bold else font_data); cA.alignment = align_left
-        if bold: cA.border = border_thin
-        if not bold and r_idx % 2 == 0: cA.fill = c_alt_fill
-        for c_idx, col in enumerate(cols, 2):
-            cell = ws.cell(row=r_idx, column=c_idx)
-            cell.value = vals_por_col[col].get(row_key, 0)
-            cell.number_format = FMT_COP_XL
-            cell.font = font_sub if bold else font_data
+    # Cuentas hoja de "Ingresos de actividades ordinarias", desglosadas por mes
+    ing_leaf = pd.DataFrame()
+    if not df_eri_raw.empty:
+        sub = df_eri_raw[df_eri_raw["Grupo"] == "INGRESOS DE ACTIVIDADES ORDINARIAS"]
+        if not sub.empty:
+            det = sub.groupby(["Codigo", "Nombre cuenta", "Mes"], dropna=False)["Saldo Mes"].sum().reset_index()
+            ing_leaf = det.pivot_table(index=["Codigo", "Nombre cuenta"], columns="Mes",
+                                        values="Saldo Mes", fill_value=0)
+            ing_leaf = ing_leaf.reindex(columns=meses_d, fill_value=0)
+            ing_leaf["ACUMULADO"] = ing_leaf.sum(axis=1)
+
+    # Las cuentas de devolución (débito, reducen el ingreso) se separan del
+    # ingreso bruto, igual que en el archivo de referencia: "Ingresos de
+    # actividades ordinarias" = bruto, "VENTAS NETAS" = bruto - devoluciones.
+    es_devolucion = ing_leaf.index.get_level_values("Nombre cuenta").str.upper().str.contains("DEVOLU", na=False) \
+        if not ing_leaf.empty else pd.Series(dtype=bool)
+    ing_bruto = {c: (-ing_leaf.loc[~es_devolucion, c].sum() if not ing_leaf.empty else vals[c][10]) for c in cols}
+    devoluciones = {c: (ing_leaf.loc[es_devolucion, c].sum() if not ing_leaf.empty else 0.0) for c in cols}
+
+    def escribir(row_n, codigo, label, valores_por_col, bold=False, total=False):
+        # Los valores ya vienen con el signo final a mostrar (positivo para
+        # gastos, igual que en el archivo de referencia: la resta se hace en
+        # las fórmulas de los subtotales, no en el signo de cada línea).
+        ws.row_dimensions[row_n].height = 18.0
+        if codigo is not None:
+            ws.cell(row=row_n, column=1).value = codigo
+            ws.cell(row=row_n, column=1).font = font_data
+        cB = ws.cell(row=row_n, column=2)
+        cB.value = label; cB.font = font_sub if (bold or total) else font_data; cB.alignment = align_left
+        if total: cB.fill = c_total_fill
+        if bold: cB.border = border_thin
+        for i, col in enumerate(cols):
+            v = valores_por_col.get(col, 0)
+            cell = ws.cell(row=row_n, column=3 + i)
+            cell.value = v; cell.number_format = FMT_COP_XL
+            cell.font = font_sub if (bold or total) else font_data
             cell.alignment = align_right
+            if total: cell.fill = c_total_fill
             if bold: cell.border = border_thin
-            elif r_idx % 2 == 0: cell.fill = c_alt_fill
 
-    max_row = 4 + len(labels)
-    ws.auto_filter.ref = f"A4:{last_col}{max_row}"
-    ws.column_dimensions["A"].width = 40.0
-    for c_idx in range(2, num_cols + 1):
-        ws.column_dimensions[get_column_letter(c_idx)].width = 18.0
+    r = 6
+    escribir(r, None, "Ingresos de actividades ordinarias", ing_bruto); r += 1
+    for (codigo, nombre) in ing_leaf.index if not ing_leaf.empty else []:
+        cod_txt = str(codigo).rstrip("0").rstrip(".") if isinstance(codigo, float) else str(codigo)
+        # Se invierte el signo (no abs()) para conservar la distinción entre
+        # ingreso (crédito, saldo negativo -> se ve positivo) y una cuenta
+        # contraria como "Devolución en ventas" (débito, saldo positivo ->
+        # se ve negativo), igual que en el archivo de referencia.
+        escribir(r, cod_txt, f"          {nombre}",
+                 {c: -float(ing_leaf.loc[(codigo, nombre), c]) for c in cols}); r += 1
+    r += 1
+    escribir(r, None, "VENTAS NETAS", {c: vals[c][10] for c in cols}, total=True); r += 2
+    escribir(r, None, "Costo del servicio", {c: abs(vals[c][11]) for c in cols}); r += 2
+    escribir(r, None, "UTILIDAD BRUTA", {c: vals[c][12] for c in cols}, total=True); r += 2
+    escribir(r, None, "Gastos Administración", {c: abs(vals[c][13] + vals[c][15]) for c in cols}); r += 2
+    escribir(r, None, "GASTOS DE OPERACION", {c: abs(vals[c][13] + vals[c][15]) for c in cols}, total=True); r += 2
+    escribir(r, None, "UTILIDAD OPERATIVA",
+             {c: vals[c][12] + vals[c][13] + vals[c][15] for c in cols}, total=True); r += 2
+    escribir(r, None, "Otros gastos", {c: abs(vals[c][16] + vals[c][21]) for c in cols}); r += 1
+    escribir(r, None, "Gastos financieros", {c: abs(vals[c][18]) for c in cols}); r += 2
+    # "Otros ingresos" incluye los ingresos financieros, igual que en el
+    # archivo de referencia (que no trae una línea separada para financieros).
+    escribir(r, None, "Otros ingresos", {c: vals[c][14] + vals[c][17] + vals[c][20] for c in cols}); r += 1
+    escribir(r, None, "Diferencia en cambio neta", {c: vals[c][19] for c in cols}); r += 2
+    escribir(r, None, "UTILIDAD ANTES DE IMPTOS", {c: vals[c][22] for c in cols}, total=True); r += 2
+    escribir(r, None, "Provisión impuesto de renta", {c: abs(vals[c][24]) for c in cols}); r += 2
+    escribir(r, None, "UTILIDAD (PERDIDA) NETA", {c: vals[c][26] for c in cols}, total=True); r += 1
+
+    max_row = r
+    ws.auto_filter.ref = f"A5:{last_col}{max_row}"
+    ws.column_dimensions["A"].width = 10.0
+    ws.column_dimensions["B"].width = 38.0
+    for c_idx in range(3, num_cols + 1):
+        ws.column_dimensions[get_column_letter(c_idx)].width = 16.0
 
 
 def generar_excel_eeff(empresa, nit, periodo, saldos_esf, saldos_patrimonio, totales_eri,
@@ -1197,9 +1368,13 @@ def generar_excel_eeff(empresa, nit, periodo, saldos_esf, saldos_patrimonio, tot
     ws_deri = wb.create_sheet("Detalle ERI")
     _escribir_df_en_hoja(ws_deri, df_eri_raw, index=False)
 
-    # Consolidado mensual (misma info del ERI, una columna por mes)
-    ws_cons = wb.create_sheet("Consolidado")
-    generar_hoja_consolidado(ws_cons, empresa, nit, pivot_eri, totales_eri, list(pivot_eri.columns[:-1]))
+    # CONSOL: detalle de gastos por cuenta y mes (réplica del archivo de referencia)
+    ws_consol = wb.create_sheet("CONSOL")
+    generar_hoja_consol(ws_consol, empresa, nit, df_eri_raw, list(pivot_eri.columns[:-1]))
+
+    # ER MENSUALIZADO: misma info del ERI, una columna por mes (no acumulada)
+    ws_cons = wb.create_sheet("ER MENSUALIZADO")
+    generar_hoja_consolidado(ws_cons, empresa, nit, pivot_eri, totales_eri, list(pivot_eri.columns[:-1]), df_eri_raw)
 
     buf = BytesIO()
     wb.save(buf)
@@ -1514,7 +1689,7 @@ with tab_exportar:
         st.session_state["eeff_filename"] = f"EEFF_Formateado_{empresa.strip().replace(' ','_')}.xlsx"
 
     if st.session_state.get("eeff_buffer"):
-        st.success("✅ Archivo generado — 7 hojas: ESF, ERI, Anexo ESF, Anexo ERI, Detalle ESF, Detalle ERI, Consolidado")
+        st.success("✅ Archivo generado — 8 hojas: ESF, ERI, Anexo ESF, Anexo ERI, Detalle ESF, Detalle ERI, CONSOL, ER MENSUALIZADO")
         st.download_button(
             label="📥 Descargar EEFF_Formateado.xlsx",
             data=st.session_state["eeff_buffer"],
@@ -1524,6 +1699,5 @@ with tab_exportar:
             key="dl_eeff_btn",
         )
     st.markdown('</div>', unsafe_allow_html=True)
-
 
 
