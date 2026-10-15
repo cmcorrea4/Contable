@@ -793,7 +793,6 @@ def _escribir_df_en_hoja(ws, df, index=True):
     """Escribe un DataFrame en un Worksheet de openpyxl sin pandas ExcelWriter."""
     from openpyxl.utils import get_column_letter
     if index:
-        # Encabezado: índice + columnas
         ws.append([""] + list(df.columns))
         for row_idx, (idx_val, row) in enumerate(df.iterrows()):
             ws.append([str(idx_val)] + [
@@ -807,6 +806,143 @@ def _escribir_df_en_hoja(ws, df, index=True):
                 float(v) if isinstance(v, (int, float)) and not pd.isna(v) else str(v)
                 for v in row
             ])
+
+
+def generar_hoja_anexo(ws, df, titulo, es_pivot=True):
+    """Formatea una hoja de Anexo (pivot mensual) o Detalle con estilo corporativo.
+
+    es_pivot=True  → índice de grupos + columnas de meses + Total general
+    es_pivot=False → tabla de detalle con columnas fijas (Codigo, Nombre cuenta, etc.)
+    """
+    from openpyxl.styles import PatternFill
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.table import Table, TableStyleInfo
+
+    azul_osc = PatternFill("solid", fgColor="1E3A5F")
+    azul_med = PatternFill("solid", fgColor="2E6DA4")
+    azul_cla = PatternFill("solid", fgColor="D6E4F0")
+    gris_cla = PatternFill("solid", fgColor="F2F4F7")
+
+    blanco  = Font(color="FFFFFF", bold=True, size=11, name="Calibri")
+    negro_b = Font(bold=True,  size=10, name="Calibri")
+    negro_n = Font(bold=False, size=10, name="Calibri")
+    centro  = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    izq     = Alignment(horizontal="left",   vertical="center", wrap_text=False)
+    der     = Alignment(horizontal="right",  vertical="center")
+
+    thin_side = Side(border_style="thin", color="CCCCCC")
+    borde_cel = Border(left=thin_side, right=thin_side,
+                       top=thin_side,  bottom=thin_side)
+
+    if es_pivot:
+        # ── Pivot: índice en col A, meses en B…, Total general en última col ──
+        cols  = list(df.columns)          # meses + "Total general"
+        n_cols = len(cols) + 1             # +1 por la columna índice
+        n_rows = len(df)
+
+        # Fila 1: título fusionado
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=n_cols)
+        c = ws.cell(1, 1, titulo)
+        c.font = blanco; c.fill = azul_osc
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        ws.row_dimensions[1].height = 22
+
+        # Fila 2: encabezados
+        ws.row_dimensions[2].height = 18
+        c = ws.cell(2, 1, "Grupo / Cuenta")
+        c.font = blanco; c.fill = azul_med; c.alignment = centro
+        for j, col in enumerate(cols, 2):
+            c = ws.cell(2, j, col)
+            c.font = blanco; c.fill = azul_med; c.alignment = centro
+
+        # Filas de datos
+        for i, (idx_val, row) in enumerate(df.iterrows(), 3):
+            ws.row_dimensions[i].height = 15
+            is_total = str(idx_val).startswith("Total")
+
+            fill = azul_cla if is_total else (gris_cla if i % 2 == 0 else None)
+            font_row = negro_b if is_total else negro_n
+
+            c = ws.cell(i, 1, str(idx_val))
+            c.font = font_row; c.alignment = izq
+            if fill: c.fill = fill
+            c.border = borde_cel
+
+            for j, col in enumerate(cols, 2):
+                val = row[col]
+                c = ws.cell(i, j)
+                c.value = float(val) if not pd.isna(val) else None
+                c.number_format = FMT_COP_XL
+                c.font = font_row; c.alignment = der
+                if fill: c.fill = fill
+                c.border = borde_cel
+
+        # Anchos: col A ancha, resto uniforme
+        ws.column_dimensions["A"].width = 55
+        for j in range(2, n_cols + 1):
+            lbl = cols[j-2] if j-2 < len(cols) else ""
+            ws.column_dimensions[get_column_letter(j)].width = 20 if lbl == "Total general" else 16
+
+        # Freeze y filtro
+        ws.freeze_panes = "B3"
+        ws.auto_filter.ref = f"A2:{get_column_letter(n_cols)}2"
+
+    else:
+        # ── Detalle: tabla de filas raw ──────────────────────────────────────
+        columnas = list(df.columns)
+        n_cols   = len(columnas)
+        n_rows   = len(df)
+
+        # Fila 1: título fusionado
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=n_cols)
+        c = ws.cell(1, 1, titulo)
+        c.font = blanco; c.fill = azul_osc
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        ws.row_dimensions[1].height = 22
+
+        # Fila 2: encabezados
+        ws.row_dimensions[2].height = 18
+        for j, col in enumerate(columnas, 1):
+            c = ws.cell(2, j, col)
+            c.font = blanco; c.fill = azul_med; c.alignment = centro
+
+        # Anchos por columna
+        anchos_det = {
+            "Codigo": 12, "Nombre cuenta": 36, "Nit": 15,
+            "Nombre tercero": 36, "Mes": 14, "Saldo Mes": 18,
+            "Cuenta": 12, "Grupo": 46,
+        }
+        for j, col in enumerate(columnas, 1):
+            ws.column_dimensions[get_column_letter(j)].width = anchos_det.get(col, 16)
+
+        # Filas de datos
+        for i, (_, row) in enumerate(df.iterrows(), 3):
+            ws.row_dimensions[i].height = 14
+            fill = gris_cla if i % 2 == 0 else None
+
+            for j, col in enumerate(columnas, 1):
+                val = row[col]
+                c = ws.cell(i, j)
+                if col == "Saldo Mes":
+                    c.value = float(val) if not pd.isna(val) else None
+                    c.number_format = FMT_COP_XL
+                    c.alignment = der
+                elif col == "Mes":
+                    c.value = str(val) if val is not None else ""
+                    c.alignment = centro
+                elif col in ("Codigo", "Nit", "Cuenta"):
+                    c.value = str(val) if val is not None else ""
+                    c.alignment = centro
+                else:
+                    c.value = str(val) if val is not None else ""
+                    c.alignment = izq
+                c.font = negro_n
+                if fill: c.fill = fill
+                c.border = borde_cel
+
+        # Freeze y filtro
+        ws.freeze_panes = "A3"
+        ws.auto_filter.ref = f"A2:{get_column_letter(n_cols)}2"
 
 
 def generar_excel_eeff(empresa, nit, periodo, saldos_esf, totales_eri,
@@ -823,21 +959,17 @@ def generar_excel_eeff(empresa, nit, periodo, saldos_esf, totales_eri,
     generar_hoja_eri(wb.create_sheet("ERI"), empresa, nit, periodo,
                      totales_eri, totales_ant=totales_eri_ant)
 
-    # Hojas de Anexo (pivot mensual) escritas directamente en el worksheet
-    ws_aesf = wb.create_sheet("Anexo ESF")
-    _escribir_df_en_hoja(ws_aesf, pivot_esf, index=True)
-    ws_aesf.column_dimensions["A"].width = 55
+    # Hojas de Anexo (pivot mensual) con formato corporativo
+    generar_hoja_anexo(wb.create_sheet("Anexo ESF"), pivot_esf,
+                       titulo="ANEXO ESF — SALDOS MENSUALES POR GRUPO", es_pivot=True)
+    generar_hoja_anexo(wb.create_sheet("Anexo ERI"), pivot_eri,
+                       titulo="ANEXO ERI — MOVIMIENTOS MENSUALES POR GRUPO", es_pivot=True)
 
-    ws_aeri = wb.create_sheet("Anexo ERI")
-    _escribir_df_en_hoja(ws_aeri, pivot_eri, index=True)
-    ws_aeri.column_dimensions["A"].width = 55
-
-    # Hojas de detalle
-    ws_desf = wb.create_sheet("Detalle ESF")
-    _escribir_df_en_hoja(ws_desf, df_esf_raw, index=False)
-
-    ws_deri = wb.create_sheet("Detalle ERI")
-    _escribir_df_en_hoja(ws_deri, df_eri_raw, index=False)
+    # Hojas de detalle con formato corporativo
+    generar_hoja_anexo(wb.create_sheet("Detalle ESF"), df_esf_raw,
+                       titulo="DETALLE ESF — MOVIMIENTOS POR TERCERO", es_pivot=False)
+    generar_hoja_anexo(wb.create_sheet("Detalle ERI"), df_eri_raw,
+                       titulo="DETALLE ERI — MOVIMIENTOS POR TERCERO", es_pivot=False)
 
     # Hojas adicionales: CONSOL y ER MENSUALIZADO
     generar_hoja_consol(wb.create_sheet("CONSOL"), empresa, df_eri_raw)
