@@ -496,6 +496,299 @@ def generar_hoja_eri(ws, empresa, nit, periodo, totales, totales_ant=None):
     ws["B31"].font = F(size=12)
 
 
+def generar_hoja_er_mensualizado(ws, empresa, df_eri_raw):
+    """Hoja ER MENSUALIZADO: P&L por mes con detalle de cuentas."""
+    from openpyxl.styles import PatternFill, colors
+    from openpyxl.utils import get_column_letter
+
+    MESES = [m for m in MESES_ORDEN if m in df_eri_raw["Mes"].unique()]
+    MESES_ABR = [MESES_ABREV.get(m, m[:3]) for m in MESES]
+
+    # Pivots por grupo y por cuenta
+    df_raw = df_eri_raw.copy()
+    df_raw["Cuenta_llave"] = df_raw["Codigo"].astype(str) + "  " + df_raw["Nombre cuenta"].str.strip()
+
+    pivot_grupo = (df_raw.groupby(["Grupo","Mes"])["Saldo Mes"].sum()
+                   .unstack(fill_value=0).reindex(columns=MESES, fill_value=0))
+    pivot_cuenta = (df_raw.groupby(["Cuenta_llave","Grupo","Mes"])["Saldo Mes"].sum()
+                    .unstack(fill_value=0).reindex(columns=MESES, fill_value=0))
+    pivot_cuenta = pivot_cuenta.reset_index()
+
+    # Estilos
+    azul_osc  = PatternFill("solid", fgColor="1E3A5F")
+    azul_med  = PatternFill("solid", fgColor="2E6DA4")
+    azul_cla  = PatternFill("solid", fgColor="D6E4F0")
+    blanco    = Font(color="FFFFFF", bold=True, size=11, name="Calibri")
+    negro_b   = Font(bold=True, size=10, name="Calibri")
+    negro_n   = Font(bold=False, size=10, name="Calibri")
+    centro    = Alignment(horizontal="center", vertical="center")
+    izq       = Alignment(horizontal="left",   vertical="center")
+
+    def fmt_num(ws, cell):
+        cell.number_format = '#,##0_);(#,##0);"-"'
+        cell.alignment = Alignment(horizontal="right", vertical="center")
+
+    # Anchos
+    ws.column_dimensions["A"].width = 12
+    ws.column_dimensions["B"].width = 42
+    for i in range(len(MESES)):
+        ws.column_dimensions[get_column_letter(i+3)].width = 16
+    ws.column_dimensions[get_column_letter(len(MESES)+3)].width = 18  # ACUMULADO
+
+    # Fila 1 — empresa
+    ws.row_dimensions[1].height = 20
+    c = ws.cell(1, 2, empresa); c.font = Font(bold=True, size=13, name="Calibri")
+
+    # Fila 2 — título con fondo azul oscuro
+    ws.row_dimensions[2].height = 22
+    ws.merge_cells(start_row=2, start_column=2, end_row=2,
+                   end_column=len(MESES)+3)
+    c = ws.cell(2, 2, "ESTADO DE RESULTADOS INTEGRAL  MENSUALIZADO - CONSOLIDADO")
+    c.font = blanco; c.fill = azul_osc; c.alignment = centro
+
+    # Fila 4 — cabecera meses
+    ws.row_dimensions[4].height = 18
+    ws.cell(4, 2, "").font = negro_b
+    for i, abr in enumerate(MESES_ABR):
+        c = ws.cell(4, i+3, abr.upper() + " ")
+        c.font = blanco; c.fill = azul_med; c.alignment = centro
+    c = ws.cell(4, len(MESES)+3, "ACUMULADO")
+    c.font = blanco; c.fill = azul_med; c.alignment = centro
+
+    # Mapeo grupos → filas del P&L
+    # (etiqueta_grupo_en_data, label_display, es_ingreso, es_subtotal_label)
+    ESTRUCTURA_PL = [
+        # Ingresos
+        ("INGRESOS DE ACTIVIDADES ORDINARIAS", "Ingresos de actividades ordinarias", True,  False),
+        (None, "VENTAS NETAS",                                                        True,  True),
+        (None, "Costo del servicio",                                                  False, False),
+        (None, "UTILIDAD BRUTA",                                                      True,  True),
+        # Gastos operación
+        ("GASTOS DE ADMINISTRACION",          "Gastos Administración",               False, False),
+        (None, "GASTOS DE OPERACION",                                                 False, True),
+        (None, "UTILIDAD OPERATIVA",                                                  True,  True),
+        # Otros
+        ("OTROS GASTOS",                      "Otros gastos",                        False, False),
+        ("GASTOS FINANCIEROS",                "Gastos financieros",                  False, False),
+        ("OTROS INGRESOS",                    "Otros ingresos",                      True,  False),
+        (None, "Diferencia en cambio neta",                                           True,  False),
+        (None, "UTILIDAD ANTES DE IMPTOS",                                            True,  True),
+        ("PROVISION DE IMPUESTOS",            "Provisión impuesto de renta",         False, False),
+        (None, "UTILIDAD (PERDIDA) NETA",                                             True,  True),
+    ]
+
+    # Precalcular acumulados por grupo
+    def gacc(g):
+        if g in pivot_grupo.index:
+            return {m: pivot_grupo.loc[g, m] for m in MESES}
+        return {m: 0 for m in MESES}
+
+    ing_m   = gacc("INGRESOS DE ACTIVIDADES ORDINARIAS")
+    gto_m   = gacc("GASTOS DE ADMINISTRACION")
+    otrg_m  = gacc("OTROS GASTOS")
+    gfin_m  = gacc("GASTOS FINANCIEROS")
+    oing_m  = gacc("OTROS INGRESOS")
+    prov_m  = gacc("PROVISION DE IMPUESTOS")
+
+    def ub(m):   return ing_m[m]
+    def uop(m):  return ing_m[m] - abs(gto_m[m])
+    def uai(m):  return uop(m) - abs(otrg_m[m]) - abs(gfin_m[m]) + abs(oing_m[m])
+    def unet(m): return uai(m) - abs(prov_m[m])
+
+    subtotales = {
+        "VENTAS NETAS":           {m: ing_m[m]  for m in MESES},
+        "Costo del servicio":     {m: 0          for m in MESES},
+        "UTILIDAD BRUTA":         {m: ub(m)      for m in MESES},
+        "GASTOS DE OPERACION":    {m: abs(gto_m[m]) for m in MESES},
+        "UTILIDAD OPERATIVA":     {m: uop(m)     for m in MESES},
+        "Diferencia en cambio neta": {m: 0        for m in MESES},
+        "UTILIDAD ANTES DE IMPTOS":  {m: uai(m)  for m in MESES},
+        "UTILIDAD (PERDIDA) NETA":   {m: unet(m) for m in MESES},
+    }
+
+    fila = 5
+    for grupo_key, label, es_ing, es_sub in ESTRUCTURA_PL:
+        ws.row_dimensions[fila].height = 16
+
+        if es_sub:
+            # Fila subtotal — fondo azul claro + negrita
+            c = ws.cell(fila, 2, label); c.font = negro_b; c.fill = azul_cla
+            vals = subtotales.get(label, {m: 0 for m in MESES})
+            for i, m in enumerate(MESES):
+                cell = ws.cell(fila, i+3, vals[m] if vals[m] != 0 else None)
+                cell.fill = azul_cla; fmt_num(ws, cell); cell.font = negro_b
+            acum = sum(vals.values())
+            cell = ws.cell(fila, len(MESES)+3, acum if acum != 0 else None)
+            cell.fill = azul_cla; fmt_num(ws, cell); cell.font = negro_b
+            fila += 1
+
+            # Filas de detalle de cuentas del grupo anterior
+            if grupo_key is None and es_sub:
+                pass  # subtotales sin grupo no tienen detalle
+        else:
+            if grupo_key and grupo_key in pivot_grupo.index:
+                # Fila de grupo (encabezado)
+                c = ws.cell(fila, 2, label); c.font = negro_n
+                vals = {m: pivot_grupo.loc[grupo_key, m] for m in MESES}
+                for i, m in enumerate(MESES):
+                    cell = ws.cell(fila, i+3, abs(vals[m]) if vals[m] != 0 else None)
+                    fmt_num(ws, cell); cell.font = negro_n
+                acum = sum(abs(v) for v in vals.values())
+                cell = ws.cell(fila, len(MESES)+3, acum if acum != 0 else None)
+                fmt_num(ws, cell); cell.font = negro_n
+                fila += 1
+
+                # Cuentas detalle
+                cuentas_grp = pivot_cuenta[pivot_cuenta["Grupo"] == grupo_key]
+                for _, cr in cuentas_grp.iterrows():
+                    ws.row_dimensions[fila].height = 15
+                    lbl = "          " + str(cr["Cuenta_llave"])
+                    c = ws.cell(fila, 2, lbl); c.font = negro_n; c.alignment = izq
+                    for i, m in enumerate(MESES):
+                        v = cr[m] if m in cr.index else 0
+                        cell = ws.cell(fila, i+3, abs(v) if v != 0 else None)
+                        fmt_num(ws, cell); cell.font = negro_n
+                    acum_c = sum(abs(cr[m]) for m in MESES if m in cr.index)
+                    cell = ws.cell(fila, len(MESES)+3, acum_c if acum_c != 0 else None)
+                    fmt_num(ws, cell); cell.font = negro_n
+                    fila += 1
+            else:
+                # Fila sin datos (ej. Costo del servicio, Diferencia en cambio)
+                c = ws.cell(fila, 2, label); c.font = negro_n
+                for i in range(len(MESES)+1):
+                    ws.cell(fila, i+3, None)
+                fila += 1
+
+    # Autofilter en fila 4
+    ws.auto_filter.ref = f"B4:{get_column_letter(len(MESES)+3)}4"
+
+
+def generar_hoja_consol(ws, empresa, df_eri_raw):
+    """Hoja CONSOL: detalle de cuentas de Gastos Adm y Gastos No Operacionales por mes."""
+    from openpyxl.styles import PatternFill
+    from openpyxl.utils import get_column_letter
+
+    MESES = [m for m in MESES_ORDEN if m in df_eri_raw["Mes"].unique()]
+    MESES_ABR = [MESES_ABREV.get(m, m[:3]) for m in MESES]
+
+    azul_osc = PatternFill("solid", fgColor="1E3A5F")
+    azul_med = PatternFill("solid", fgColor="2E6DA4")
+    azul_cla = PatternFill("solid", fgColor="D6E4F0")
+    blanco   = Font(color="FFFFFF", bold=True, size=11, name="Calibri")
+    negro_b  = Font(bold=True, size=10, name="Calibri")
+    negro_n  = Font(bold=False, size=10, name="Calibri")
+    centro   = Alignment(horizontal="center", vertical="center")
+
+    def fmt_num(cell):
+        cell.number_format = '#,##0.##_);(#,##0.##);"-"'
+        cell.alignment = Alignment(horizontal="right", vertical="center")
+
+    ws.column_dimensions["A"].width = 42
+    for i in range(len(MESES)):
+        ws.column_dimensions[get_column_letter(i+2)].width = 15
+    ws.column_dimensions[get_column_letter(len(MESES)+2)].width = 18  # ACUMULADO
+    ws.column_dimensions[get_column_letter(len(MESES)+3)].width = 16  # PROMEDIO
+
+    # Fila 2 — título
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(MESES)+3)
+    c = ws.cell(2, 1, f"ANEXOS DEL ESTADO DE RESULTADOS - CONSOLIDADO — {empresa}")
+    c.font = blanco; c.fill = azul_osc
+    c.alignment = Alignment(horizontal="center", vertical="center")
+
+    # Fila 4 — cabecera
+    for i, abr in enumerate(MESES_ABR):
+        c = ws.cell(4, i+2, abr.upper())
+        c.font = blanco; c.fill = azul_med
+        c.alignment = Alignment(horizontal="center")
+    c = ws.cell(4, len(MESES)+2, "ACUMULADO")
+    c.font = blanco; c.fill = azul_med
+    c.alignment = Alignment(horizontal="center")
+    c = ws.cell(4, len(MESES)+3, "PROMEDIO")
+    c.font = blanco; c.fill = azul_med
+    c.alignment = Alignment(horizontal="center")
+
+    # Grupos a mostrar en CONSOL
+    GRUPOS_CONSOL = [
+        ("GASTOS DE ADMINISTRACION",  "GASTOS DE ADMINISTRACIÓN",  "TOTAL GASTOS DE ADMINISTRACIÓN "),
+        ("GASTOS FINANCIEROS",        "GASTOS NO OPERACIONALES",   "TOTAL  GTOS NO OPERACIONALES"),
+    ]
+
+    df_raw = df_eri_raw.copy()
+    df_raw["Cuenta_llave"] = df_raw["Codigo"].astype(str).str.strip() + "  " + df_raw["Nombre cuenta"].str.strip()
+    pivot_cuenta = (df_raw.groupby(["Cuenta_llave","Grupo","Mes"])["Saldo Mes"].sum()
+                    .unstack(fill_value=0).reindex(columns=MESES, fill_value=0)
+                    .reset_index())
+
+    fila = 5
+    for grupo_key, titulo_secc, titulo_total in GRUPOS_CONSOL:
+        ws.row_dimensions[fila].height = 16
+        c = ws.cell(fila, 1, titulo_secc); c.font = negro_b; c.fill = azul_cla
+        fila += 1
+        ws.row_dimensions[fila].height = 4; fila += 1  # espacio
+
+        cuentas_grp = pivot_cuenta[pivot_cuenta["Grupo"] == grupo_key]
+        totales_mes = {m: 0 for m in MESES}
+
+        for _, cr in cuentas_grp.iterrows():
+            ws.row_dimensions[fila].height = 15
+            lbl = str(cr["Cuenta_llave"])
+            c = ws.cell(fila, 1, lbl); c.font = negro_n
+            row_sum = 0
+            for i, m in enumerate(MESES):
+                v = abs(cr[m]) if m in cr.index else 0
+                totales_mes[m] += v
+                cell = ws.cell(fila, i+2, v if v != 0 else None)
+                fmt_num(cell); cell.font = negro_n
+                row_sum += v
+            cell = ws.cell(fila, len(MESES)+2, row_sum if row_sum != 0 else None)
+            fmt_num(cell); cell.font = negro_n
+            prom = row_sum / len(MESES) if MESES else 0
+            cell = ws.cell(fila, len(MESES)+3, prom if prom != 0 else None)
+            fmt_num(cell); cell.font = negro_n
+            fila += 1
+
+        # Fila total sección
+        ws.row_dimensions[fila].height = 16
+        c = ws.cell(fila, 1, titulo_total); c.font = negro_b; c.fill = azul_cla
+        total_acum = 0
+        for i, m in enumerate(MESES):
+            v = totales_mes[m]
+            cell = ws.cell(fila, i+2, v if v != 0 else None)
+            cell.fill = azul_cla; fmt_num(cell); cell.font = negro_b
+            total_acum += v
+        cell = ws.cell(fila, len(MESES)+2, total_acum if total_acum != 0 else None)
+        cell.fill = azul_cla; fmt_num(cell); cell.font = negro_b
+        prom_t = total_acum / len(MESES) if MESES else 0
+        cell = ws.cell(fila, len(MESES)+3, prom_t if prom_t != 0 else None)
+        cell.fill = azul_cla; fmt_num(cell); cell.font = negro_b
+        fila += 2  # salto entre secciones
+
+    # Fila gran total
+    ws.row_dimensions[fila].height = 16
+    c = ws.cell(fila, 1, "TOTAL COSTOS Y GASTOS DE LA CIA."); c.font = negro_b; c.fill = azul_cla
+    gt = 0
+    for grupo_key, _, _ in GRUPOS_CONSOL:
+        cg = pivot_cuenta[pivot_cuenta["Grupo"] == grupo_key]
+        for _, cr in cg.iterrows():
+            for m in MESES:
+                gt += abs(cr[m]) if m in cr.index else 0
+    # recalcular por mes
+    total_final = {m: 0 for m in MESES}
+    for grupo_key, _, _ in GRUPOS_CONSOL:
+        cg = pivot_cuenta[pivot_cuenta["Grupo"] == grupo_key]
+        for _, cr in cg.iterrows():
+            for m in MESES:
+                total_final[m] += abs(cr[m]) if m in cr.index else 0
+    t_acum = 0
+    for i, m in enumerate(MESES):
+        v = total_final[m]
+        cell = ws.cell(fila, i+2, v if v != 0 else None)
+        cell.fill = azul_cla; fmt_num(cell); cell.font = negro_b
+        t_acum += v
+    cell = ws.cell(fila, len(MESES)+2, t_acum if t_acum != 0 else None)
+    cell.fill = azul_cla; fmt_num(cell); cell.font = negro_b
+
+
 def _escribir_df_en_hoja(ws, df, index=True):
     """Escribe un DataFrame en un Worksheet de openpyxl sin pandas ExcelWriter."""
     from openpyxl.utils import get_column_letter
@@ -545,6 +838,10 @@ def generar_excel_eeff(empresa, nit, periodo, saldos_esf, totales_eri,
 
     ws_deri = wb.create_sheet("Detalle ERI")
     _escribir_df_en_hoja(ws_deri, df_eri_raw, index=False)
+
+    # Hojas adicionales: CONSOL y ER MENSUALIZADO
+    generar_hoja_consol(wb.create_sheet("CONSOL"), empresa, df_eri_raw)
+    generar_hoja_er_mensualizado(wb.create_sheet("ER MENSUALIZADO"), empresa, df_eri_raw)
 
     buf = BytesIO()
     wb.save(buf)
@@ -853,7 +1150,7 @@ with tab_exportar:
                 totales_eri_ant=totales_eri_ant,
             )
         periodo_ant_msg = " (con período anterior)" if saldos_esf_ant else ""
-        st.success(f"✅ Archivo generado{periodo_ant_msg} — 6 hojas: ESF, ERI, Anexo ESF, Anexo ERI, Detalle ESF, Detalle ERI")
+        st.success(f"✅ Archivo generado{periodo_ant_msg} — 8 hojas: ESF, ERI, Anexo ESF, Anexo ERI, Detalle ESF, Detalle ERI, CONSOL, ER MENSUALIZADO")
         st.download_button(
             label="📥 Descargar EEFF_Formateado.xlsx",
             data=buf_eeff,
