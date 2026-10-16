@@ -166,6 +166,7 @@ def _es_mes_anterior(nombre_mes: str) -> bool:
     return "ANTERIOR" in s or ("PERIOD" in s and "ANT" in s)
 
 
+@st.cache_data(show_spinner="Procesando archivo…")
 def procesar_archivo(file_bytes: bytes):
     xls = pd.ExcelFile(BytesIO(file_bytes))
     if "terceros_" not in xls.sheet_names:
@@ -1427,39 +1428,26 @@ with tab_exportar:
     saldos_esf_ant  = _saldos_esf_ant_auto
     totales_eri_ant = _totales_eri_ant_auto
 
-    # ── Diagnóstico: mostrar valores detectados para período anterior ──────────
-    with st.expander("🔍 Diagnóstico período anterior (expandir para ver)", expanded=False):
-        st.write("**`_saldos_esf_ant_auto`:**", _saldos_esf_ant_auto)
-        st.write("**`_totales_eri_ant_auto`:**", _totales_eri_ant_auto)
-        try:
-            _df_d = pd.read_excel(BytesIO(file_bytes), sheet_name="terceros_")
-            _meses_unicos = list(_df_d["Mes"].astype(str).str.strip().unique())
-            st.write("**Valores únicos en columna Mes:**", _meses_unicos)
-            _ant_rows = _df_d[_df_d["Mes"].apply(_es_mes_anterior)]
-            st.write(f"**Filas detectadas como período anterior:** {len(_ant_rows)}")
-            if not _ant_rows.empty:
-                st.dataframe(_ant_rows.head(10))
-        except Exception as _ex:
-            st.write("(error leyendo Mes):", _ex)
-
     if _saldos_esf_ant_auto:
         st.success("✅ Período anterior detectado en el mismo archivo (fila con Mes = 'PERIODO ANTERIOR')")
     else:
-        st.markdown("**📂 Archivo del período anterior** *(opcional — o agrega filas con Mes='PERIODO ANTERIOR' en el mismo archivo)*")
+        st.markdown("**📂 Archivo del período anterior** *(opcional)*")
         uploaded_ant = st.file_uploader(
-            "Sube el archivo Excel del año anterior",
+            "Sube el archivo Excel del año anterior (misma estructura, hoja 'terceros_')",
             type=["xlsx"],
             key="uploader_anterior",
-            label_visibility="collapsed",
-            help="Debe tener la misma estructura (hoja 'terceros_'). Alternativa: agrega filas con Mes='PERIODO ANTERIOR' en el mismo archivo.",
         )
-        if uploaded_ant:
+        if uploaded_ant is not None:
+            # Guardar bytes en session_state para que sobrevivan reruns
+            st.session_state["_ant_bytes"] = uploaded_ant.read()
+            st.session_state["_ant_name"]  = uploaded_ant.name
+
+        if "_ant_bytes" in st.session_state:
             try:
-                ant_bytes = uploaded_ant.read()
-                res_ant = procesar_archivo(ant_bytes)
-                saldos_esf_ant  = res_ant[4]   # saldos_esf del archivo anterior
-                totales_eri_ant = res_ant[5]   # totales_eri del archivo anterior
-                st.success(f"✅ Archivo año anterior cargado: **{uploaded_ant.name}**")
+                res_ant = procesar_archivo(st.session_state["_ant_bytes"])
+                saldos_esf_ant  = res_ant[4]   # saldos_esf del último mes del archivo anterior
+                totales_eri_ant = res_ant[5]   # totales_eri acumulados del archivo anterior
+                st.success(f"✅ Archivo año anterior cargado: **{st.session_state.get('_ant_name','')}**")
             except Exception as ex:
                 st.warning(f"⚠️ No se pudo procesar el archivo anterior: {ex}")
                 saldos_esf_ant  = None
