@@ -267,8 +267,16 @@ def set_val(ws, cell_ref, value, bold=False, size=13, fmt=None,
 def generar_hoja_esf(ws, empresa, nit, periodo, saldos, saldos_ant=None):
     """saldos_ant: dict grupo→valor para la columna 'Período anterior' (F/M).
        Si es None o vacío, las columnas F/M quedan en blanco."""
+    from openpyxl.styles import PatternFill as _PF
     if saldos_ant is None:
         saldos_ant = {}
+    hay_ant = bool(saldos_ant)  # True si se proporcionó período anterior
+
+    # ── Paleta corporativa ────────────────────────────────────────────────────
+    esf_azul_osc = _PF("solid", fgColor="1E3A5F")
+    esf_azul_med = _PF("solid", fgColor="2E6DA4")
+    esf_azul_cla = _PF("solid", fgColor="D6E4F0")
+    esf_gris     = _PF("solid", fgColor="F2F4F7")
 
     anchos = {"A":4,"B":49.6,"C":6.1,"D":17.7,"E":2.6,"F":17.7,
               "G":2.6,"H":12.1,"I":49.6,"J":6.1,"K":17.7,"L":2.6,"M":17.7,"N":12}
@@ -276,28 +284,50 @@ def generar_hoja_esf(ws, empresa, nit, periodo, saldos, saldos_ant=None):
         ws.column_dimensions[col].width = w
     for r in range(1, 42):
         ws.row_dimensions[r].height = 15.0
-    ws.row_dimensions[1].height = 26.1
-    for r in [2,3,4,5]: ws.row_dimensions[r].height = 20.1
+    ws.row_dimensions[1].height = 30
+    for r in [2,3,4,5]: ws.row_dimensions[r].height = 22
+    for r in [7,8]: ws.row_dimensions[r].height = 18
 
-    # Encabezado
-    for r, txt, bold in [(1,empresa,True),(2,nit,False),
-                         (3,"ESTADO DE SITUACIÓN FINANCIERA",True),
-                         (4,periodo,False),(5,"(En pesos colombianos - $)",False)]:
-        c = ws[f"B{r}"]; c.value = txt; c.font = F(bold=bold, size=18)
+    # ── Encabezado (filas 1-5): fondo azul oscuro, texto blanco ──────────────
+    _all_cols = list("BCDEFGHIJKLMN")
+    for r, txt, bold, sz in [(1,empresa,True,16),(2,nit,False,13),
+                              (3,"ESTADO DE SITUACIÓN FINANCIERA",True,15),
+                              (4,periodo,False,12),(5,"(En pesos colombianos - $)",False,11)]:
+        for col in _all_cols:
+            ws[f"{col}{r}"].fill = esf_azul_osc
+        c = ws[f"B{r}"]; c.value = txt
+        c.font = Font(bold=bold, size=sz, name="Calibri", color="FFFFFF")
 
-    # Cabecera columnas fila 7-8
+    # ── Fila 6: separador ────────────────────────────────────────────────────
+    ws.row_dimensions[6].height = 6
+    for col in _all_cols:
+        ws[f"{col}6"].fill = esf_azul_med
+
+    # ── Cabecera columnas fila 7-8: fondo azul medio ──────────────────────────
+    for col in _all_cols:
+        ws[f"{col}7"].fill = esf_azul_med
+        ws[f"{col}8"].fill = esf_azul_med
     for col, val in [("C","NOTA"),("D",periodo),("F","Período anterior"),
                      ("J","NOTA"),("K",periodo),("M","Período anterior")]:
-        ws[f"{col}7"].value = val
-        ws[f"{col}7"].font  = F(bold=True, size=13)
-        ws[f"{col}7"].alignment = A("center")
+        c = ws[f"{col}7"]; c.value = val
+        c.font = Font(bold=True, size=11, name="Calibri", color="FFFFFF")
+        c.alignment = A("center")
     for col in ["D","F","K","M"]:
-        ws[f"{col}8"].value = "$"; ws[f"{col}8"].font = F(bold=True,size=13)
-        ws[f"{col}8"].alignment = A("center")
+        c = ws[f"{col}8"]; c.value = "$"
+        c.font = Font(bold=True, size=11, name="Calibri", color="FFFFFF")
+        c.alignment = A("center")
 
-    # Títulos sección
-    ws["B9"].value = "ACTIVOS";              ws["B9"].font = F(bold=True, size=14)
-    ws["I9"].value = "PASIVOS Y PATRIMONIO"; ws["I9"].font = F(bold=True, size=14)
+    # ── Fila 9: títulos sección — fondo azul claro ────────────────────────────
+    ws.row_dimensions[9].height = 18
+    for col in list("BCDEFG"):
+        ws[f"{col}9"].fill = esf_azul_cla
+    for col in list("HIJKLMN"):
+        ws[f"{col}9"].fill = esf_azul_cla
+    ws["B9"].value = "ACTIVOS"
+    ws["B9"].font = Font(bold=True, size=13, name="Calibri", color="1E3A5F")
+    ws["I9"].value = "PASIVOS Y PATRIMONIO"
+    ws["I9"].font = Font(bold=True, size=13, name="Calibri", color="1E3A5F")
+
     ws["B11"].value = "Activos corrientes:"; ws["B11"].font = F(size=13)
     ws["I11"].value = "Pasivos corrientes:"; ws["I11"].font = F(size=13)
 
@@ -324,7 +354,7 @@ def generar_hoja_esf(ws, empresa, nit, periodo, saldos, saldos_ant=None):
     ws["B19"].value = "Total activos corrientes"; ws["B19"].font = F(size=13)
     ws["D19"].value = total_act_cte;     ws["D19"].number_format = FMT_SUB_XL
     ws["D19"].font = F(size=13); ws["D19"].border = Border(bottom=thin())
-    if total_act_cte_ant:
+    if hay_ant:
         ws["F19"].value = total_act_cte_ant; ws["F19"].number_format = FMT_SUB_XL
         ws["F19"].font = F(size=13); ws["F19"].border = Border(bottom=thin())
 
@@ -347,18 +377,23 @@ def generar_hoja_esf(ws, empresa, nit, periodo, saldos, saldos_ant=None):
     ws["B28"].value = "Total activos no corrientes"; ws["B28"].font = F(size=13)
     ws["D28"].value = total_act_nct;     ws["D28"].number_format = FMT_SUB_XL
     ws["D28"].font = F(size=13); ws["D28"].border = Border(bottom=thin())
-    if total_act_nct_ant:
+    if hay_ant:
         ws["F28"].value = total_act_nct_ant; ws["F28"].number_format = FMT_SUB_XL
         ws["F28"].font = F(size=13); ws["F28"].border = Border(bottom=thin())
 
     total_act     = total_act_cte     + total_act_nct
     total_act_ant = total_act_cte_ant + total_act_nct_ant
-    ws["B38"].value = "TOTAL ACTIVOS"; ws["B38"].font = F(bold=True, size=14)
+    for col in list("BCDEFG"):
+        ws[f"{col}38"].fill = esf_azul_cla
+    ws["B38"].value = "TOTAL ACTIVOS"
+    ws["B38"].font = Font(bold=True, size=14, name="Calibri", color="1E3A5F")
     ws["D38"].value = total_act;     ws["D38"].number_format = FMT_COP_XL
-    ws["D38"].font = F(bold=True, size=14); ws["D38"].border = Border(bottom=double())
-    if total_act_ant:
+    ws["D38"].font = Font(bold=True, size=14, name="Calibri", color="1E3A5F")
+    ws["D38"].border = Border(bottom=double())
+    if hay_ant:
         ws["F38"].value = total_act_ant; ws["F38"].number_format = FMT_COP_XL
-        ws["F38"].font = F(bold=True, size=14); ws["F38"].border = Border(bottom=double())
+        ws["F38"].font = Font(bold=True, size=14, name="Calibri", color="1E3A5F")
+        ws["F38"].border = Border(bottom=double())
 
     # ── Pasivos corrientes (col I/K/M) ────────────────────────────────────────
     pas_cte_map = [
@@ -381,7 +416,7 @@ def generar_hoja_esf(ws, empresa, nit, periodo, saldos, saldos_ant=None):
     ws["I20"].value = "Total pasivos corrientes"; ws["I20"].font = F(size=13)
     ws["K20"].value = total_pas_cte;     ws["K20"].number_format = FMT_SUB_XL
     ws["K20"].font = F(size=13); ws["K20"].border = Border(bottom=thin())
-    if total_pas_cte_ant:
+    if hay_ant:
         ws["M20"].value = total_pas_cte_ant; ws["M20"].number_format = FMT_SUB_XL
         ws["M20"].font = F(size=13); ws["M20"].border = Border(bottom=thin())
 
@@ -404,18 +439,23 @@ def generar_hoja_esf(ws, empresa, nit, periodo, saldos, saldos_ant=None):
     ws["I26"].value = "Total pasivos no corrientes"; ws["I26"].font = F(size=13)
     ws["K26"].value = total_pas_nct;     ws["K26"].number_format = FMT_SUB_XL
     ws["K26"].font = F(size=13); ws["K26"].border = Border(bottom=thin())
-    if total_pas_nct_ant:
+    if hay_ant:
         ws["M26"].value = total_pas_nct_ant; ws["M26"].number_format = FMT_SUB_XL
         ws["M26"].font = F(size=13); ws["M26"].border = Border(bottom=thin())
 
     total_pas     = total_pas_cte     + total_pas_nct
     total_pas_ant = total_pas_cte_ant + total_pas_nct_ant
-    ws["I28"].value = "TOTAL PASIVOS"; ws["I28"].font = F(bold=True, size=14)
+    for col in list("HIJKLMN"):
+        ws[f"{col}28"].fill = esf_azul_cla
+    ws["I28"].value = "TOTAL PASIVOS"
+    ws["I28"].font = Font(bold=True, size=14, name="Calibri", color="1E3A5F")
     ws["K28"].value = total_pas;     ws["K28"].number_format = FMT_COP_XL
-    ws["K28"].font = F(bold=True, size=14); ws["K28"].border = Border(bottom=double())
-    if total_pas_ant:
+    ws["K28"].font = Font(bold=True, size=14, name="Calibri", color="1E3A5F")
+    ws["K28"].border = Border(bottom=double())
+    if hay_ant:
         ws["M28"].value = total_pas_ant; ws["M28"].number_format = FMT_COP_XL
-        ws["M28"].font = F(bold=True, size=14); ws["M28"].border = Border(bottom=double())
+        ws["M28"].font = Font(bold=True, size=14, name="Calibri", color="1E3A5F")
+        ws["M28"].border = Border(bottom=double())
 
     # ── Patrimonio (col I/K) ──────────────────────────────────────────────────
     ws["I30"].value = "Patrimonio:"; ws["I30"].font = F(size=13)
@@ -425,20 +465,29 @@ def generar_hoja_esf(ws, empresa, nit, periodo, saldos, saldos_ant=None):
 
     patrimonio     = total_act - total_pas
     patrimonio_ant = total_act_ant - total_pas_ant
+    for col in list("HIJKLMN"):
+        ws[f"{col}36"].fill = esf_azul_cla
+        ws[f"{col}38"].fill = esf_azul_cla
     ws["K36"].value = patrimonio;     ws["K36"].number_format = FMT_COP_XL
-    ws["K36"].font = F(bold=True, size=14); ws["K36"].border = Border(bottom=double())
-    if total_act_ant:
+    ws["K36"].font = Font(bold=True, size=14, name="Calibri", color="1E3A5F")
+    ws["K36"].border = Border(bottom=double())
+    if hay_ant:
         ws["M36"].value = patrimonio_ant; ws["M36"].number_format = FMT_COP_XL
-        ws["M36"].font = F(bold=True, size=14); ws["M36"].border = Border(bottom=double())
+        ws["M36"].font = Font(bold=True, size=14, name="Calibri", color="1E3A5F")
+        ws["M36"].border = Border(bottom=double())
 
-    ws["I36"].value = "TOTAL PATRIMONIO"; ws["I36"].font = F(bold=True, size=14)
-    ws["I38"].value = "TOTAL PASIVOS Y PATRIMONIO"; ws["I38"].font = F(bold=True, size=14)
+    ws["I36"].value = "TOTAL PATRIMONIO"
+    ws["I36"].font = Font(bold=True, size=14, name="Calibri", color="1E3A5F")
+    ws["I38"].value = "TOTAL PASIVOS Y PATRIMONIO"
+    ws["I38"].font = Font(bold=True, size=14, name="Calibri", color="1E3A5F")
     # TOTAL PASIVOS Y PATRIMONIO = TOTAL ACTIVOS (ecuación fundamental)
     ws["K38"].value = total_act; ws["K38"].number_format = FMT_COP_XL
-    ws["K38"].font = F(bold=True, size=14); ws["K38"].border = Border(bottom=double())
-    if total_act_ant:
+    ws["K38"].font = Font(bold=True, size=14, name="Calibri", color="1E3A5F")
+    ws["K38"].border = Border(bottom=double())
+    if hay_ant:
         ws["M38"].value = total_act_ant; ws["M38"].number_format = FMT_COP_XL
-        ws["M38"].font = F(bold=True, size=14); ws["M38"].border = Border(bottom=double())
+        ws["M38"].font = Font(bold=True, size=14, name="Calibri", color="1E3A5F")
+        ws["M38"].border = Border(bottom=double())
 
     ws["B40"].value = "Las notas adjuntas forman parte integral de estos estados financieros."
     ws["B40"].font = F(size=11)
@@ -447,33 +496,55 @@ def generar_hoja_esf(ws, empresa, nit, periodo, saldos, saldos_ant=None):
 def generar_hoja_eri(ws, empresa, nit, periodo, totales, totales_ant=None):
     """totales_ant: dict grupo→valor para la columna F 'Período anterior'.
        Si es None o vacío, la columna F queda en blanco."""
+    from openpyxl.styles import PatternFill as _PF
     if totales_ant is None:
         totales_ant = {}
+
+    # ── Paleta corporativa ────────────────────────────────────────────────────
+    eri_azul_osc = _PF("solid", fgColor="1E3A5F")
+    eri_azul_med = _PF("solid", fgColor="2E6DA4")
+    eri_azul_cla = _PF("solid", fgColor="D6E4F0")
 
     anchos = {"A":0.9,"B":43.9,"C":6.1,"D":16.6,"E":2.6,"F":16.6,"G":9.0}
     for col, w in anchos.items():
         ws.column_dimensions[col].width = w
     for r in range(1, 35):
         ws.row_dimensions[r].height = 15.0
-    for r, h in [(1,26.1),(2,20.1),(3,20.1),(4,20.1),(5,20.1),(6,18.0)]:
+    for r, h in [(1,30),(2,22),(3,22),(4,20),(5,18),(6,18),(7,18),(8,18)]:
         ws.row_dimensions[r].height = h
 
-    for r, txt, bold in [(1,empresa,True),(2,nit,False),
-                         (3,"ESTADO DE RESULTADOS INTEGRAL",True),
-                         (4,periodo,False),(5,"(En pesos colombianos - $)",False)]:
-        c = ws[f"B{r}"]; c.value = txt; c.font = F(bold=bold, size=18)
+    # ── Encabezado (filas 1-5): fondo azul oscuro ─────────────────────────────
+    _eri_cols = list("BCDEFG")
+    for r, txt, bold, sz in [(1,empresa,True,16),(2,nit,False,13),
+                              (3,"ESTADO DE RESULTADOS INTEGRAL",True,15),
+                              (4,periodo,False,12),(5,"(En pesos colombianos - $)",False,11)]:
+        for col in _eri_cols:
+            ws[f"{col}{r}"].fill = eri_azul_osc
+        c = ws[f"B{r}"]; c.value = txt
+        c.font = Font(bold=bold, size=sz, name="Calibri", color="FFFFFF")
+
+    # ── Fila 6: cabecera "Acumulado" — fondo azul medio ──────────────────────
+    for col in _eri_cols:
+        ws[f"{col}6"].fill = eri_azul_med
+        ws[f"{col}7"].fill = eri_azul_med
+        ws[f"{col}8"].fill = eri_azul_med
 
     for col, val in [("D","Acumulado"),("F","Acumulado")]:
-        ws[f"{col}6"].value = val; ws[f"{col}6"].font = F(bold=True, size=14)
-        ws[f"{col}6"].alignment = A("center")
+        c = ws[f"{col}6"]; c.value = val
+        c.font = Font(bold=True, size=12, name="Calibri", color="FFFFFF")
+        c.alignment = A("center")
 
-    ws["C7"].value = "NOTA"; ws["C7"].font = F(bold=True, size=13); ws["C7"].alignment = A("center")
+    c = ws["C7"]; c.value = "NOTA"
+    c.font = Font(bold=True, size=11, name="Calibri", color="FFFFFF")
+    c.alignment = A("center")
     for col, val in [("D",2025),("F",2024)]:
-        ws[f"{col}7"].value = val; ws[f"{col}7"].font = F(bold=True, size=13)
-        ws[f"{col}7"].alignment = A("center")
+        c = ws[f"{col}7"]; c.value = val
+        c.font = Font(bold=True, size=11, name="Calibri", color="FFFFFF")
+        c.alignment = A("center")
     for col in ["D","F"]:
-        ws[f"{col}8"].value = "$"; ws[f"{col}8"].font = F(bold=True, size=13)
-        ws[f"{col}8"].alignment = A("center")
+        c = ws[f"{col}8"]; c.value = "$"
+        c.font = Font(bold=True, size=11, name="Calibri", color="FFFFFF")
+        c.alignment = A("center")
 
     # Valores con signo contable — período actual
     ing_ord  = abs(totales.get("INGRESOS DE ACTIVIDADES ORDINARIAS", 0))
@@ -517,20 +588,28 @@ def generar_hoja_eri(ws, empresa, nit, periodo, totales, totales_ant=None):
     ]
 
     for row_n, label, nota, val, val_a, bold, border in lineas:
-        ws[f"B{row_n}"].value = label; ws[f"B{row_n}"].font = F(bold=bold, size=13)
+        # Fondo azul claro para filas de subtotal/total (bold)
+        if bold:
+            for col in _eri_cols:
+                ws[f"{col}{row_n}"].fill = eri_azul_cla
+        ws[f"B{row_n}"].value = label
+        ws[f"B{row_n}"].font = Font(bold=bold, size=13, name="Calibri",
+                                    color="1E3A5F" if bold else "000000")
         if nota:
             ws[f"C{row_n}"].value = nota; ws[f"C{row_n}"].font = F(size=13)
             ws[f"C{row_n}"].alignment = A("center")
         # Columna D — período actual
         c = ws[f"D{row_n}"]
         c.value = val if val != 0 else None
-        c.number_format = FMT_COP_XL; c.font = F(bold=bold, size=13)
+        c.number_format = FMT_COP_XL
+        c.font = Font(bold=bold, size=13, name="Calibri", color="1E3A5F" if bold else "000000")
         if border == "double": c.border = Border(bottom=double())
         # Columna F — período anterior
         if hay_ant:
             cf = ws[f"F{row_n}"]
             cf.value = val_a if val_a != 0 else None
-            cf.number_format = FMT_COP_XL; cf.font = F(bold=bold, size=13)
+            cf.number_format = FMT_COP_XL
+            cf.font = Font(bold=bold, size=13, name="Calibri", color="1E3A5F" if bold else "000000")
             if border == "double": cf.border = Border(bottom=double())
 
     ws["B31"].value = "Las notas adjuntas forman parte integral de estos estados financieros."
@@ -547,7 +626,7 @@ def generar_hoja_er_mensualizado(ws, empresa, df_eri_raw):
 
     # Pivots por grupo y por cuenta
     df_raw = df_eri_raw.copy()
-    df_raw["Cuenta_llave"] = df_raw["Codigo"].astype(str) + "  " + df_raw["Nombre cuenta"].str.strip()
+    df_raw["Cuenta_llave"] = df_raw["Nombre cuenta"].str.strip()
 
     pivot_grupo = (df_raw.groupby(["Grupo","Mes"])["Saldo Mes"].sum()
                    .unstack(fill_value=0).reindex(columns=MESES, fill_value=0))
@@ -765,7 +844,7 @@ def generar_hoja_consol(ws, empresa, df_eri_raw):
 
     # Preparar pivot por cuenta × mes
     df_raw = df_eri_raw.copy()
-    df_raw["_cuenta"] = df_raw["Codigo"].astype(str).str.strip() + "  " + df_raw["Nombre cuenta"].str.strip()
+    df_raw["_cuenta"] = df_raw["Nombre cuenta"].str.strip()
     pivot_cta = (df_raw.groupby(["_cuenta", "Grupo", "Mes"])["Saldo Mes"].sum()
                  .unstack(fill_value=0).reindex(columns=MESES, fill_value=0)
                  .reset_index())
