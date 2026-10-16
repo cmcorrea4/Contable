@@ -166,7 +166,6 @@ def _es_mes_anterior(nombre_mes: str) -> bool:
     return "ANTERIOR" in s or ("PERIOD" in s and "ANT" in s)
 
 
-@st.cache_data(show_spinner="Procesando archivo…")
 def procesar_archivo(file_bytes: bytes):
     xls = pd.ExcelFile(BytesIO(file_bytes))
     if "terceros_" not in xls.sheet_names:
@@ -1432,17 +1431,16 @@ with tab_exportar:
     with st.expander("🔍 Diagnóstico período anterior (expandir para ver)", expanded=False):
         st.write("**`_saldos_esf_ant_auto`:**", _saldos_esf_ant_auto)
         st.write("**`_totales_eri_ant_auto`:**", _totales_eri_ant_auto)
-        # Mostrar valores únicos de Mes en el archivo para verificar el token
-        from openpyxl import load_workbook as _lwb
-        import io as _io
         try:
-            _wb_d = _lwb(_io.BytesIO(file_bytes))
-            _ws_d = next((s for s in _wb_d.sheetnames if s.lower().startswith("terceros")), None)
-            if _ws_d:
-                _df_d = pd.read_excel(_io.BytesIO(file_bytes), sheet_name=_ws_d)
-                st.write("**Valores únicos en columna Mes:**", list(_df_d["Mes"].astype(str).str.strip().unique()))
+            _df_d = pd.read_excel(BytesIO(file_bytes), sheet_name="terceros_")
+            _meses_unicos = list(_df_d["Mes"].astype(str).str.strip().unique())
+            st.write("**Valores únicos en columna Mes:**", _meses_unicos)
+            _ant_rows = _df_d[_df_d["Mes"].apply(_es_mes_anterior)]
+            st.write(f"**Filas detectadas como período anterior:** {len(_ant_rows)}")
+            if not _ant_rows.empty:
+                st.dataframe(_ant_rows.head(10))
         except Exception as _ex:
-            st.write("(no se pudo leer Mes):", _ex)
+            st.write("(error leyendo Mes):", _ex)
 
     if _saldos_esf_ant_auto:
         st.success("✅ Período anterior detectado en el mismo archivo (fila con Mes = 'PERIODO ANTERIOR')")
