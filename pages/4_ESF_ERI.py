@@ -1097,8 +1097,11 @@ def generar_hoja_anexo(ws, df_raw_src, titulo, es_pivot=True, grupos_orden=None)
 
     # ────────────────────────────────────────────────────────────────────────────
     else:
-        # Tabla de detalle plano
+        # Tabla de detalle plano — sin columna Codigo ni Cuenta
         df = df_raw_src.copy()
+        for _col_drop in ("Codigo", "Cuenta"):
+            if _col_drop in df.columns:
+                df = df.drop(columns=[_col_drop])
         columnas = list(df.columns)
         n_cols   = len(columnas)
 
@@ -1315,7 +1318,7 @@ with tab_eri:
         mask = df_eri_raw["Grupo"] == gd
         if md != "Todos": mask &= df_eri_raw["Mes"] == md
         df_d = (df_eri_raw[mask & df_eri_raw["Nombre tercero"].notna()]
-            [["Mes","Codigo","Nombre cuenta","Nit","Nombre tercero","Saldo Mes"]]
+            [["Mes","Nombre cuenta","Nit","Nombre tercero","Saldo Mes"]]
             .sort_values("Saldo Mes", key=abs, ascending=False).reset_index(drop=True))
         df_d["Saldo Mes"] = df_d["Saldo Mes"].apply(fmt_cop)
         st.dataframe(df_d, use_container_width=True, height=400)
@@ -1403,7 +1406,7 @@ with tab_esf:
         mask_e = df_esf_raw["Grupo"] == gde
         if mde != "Todos": mask_e &= df_esf_raw["Mes"] == mde
         df_de = (df_esf_raw[mask_e & df_esf_raw["Nombre tercero"].notna()]
-            [["Mes","Codigo","Nombre cuenta","Nit","Nombre tercero","Saldo Mes"]]
+            [["Mes","Nombre cuenta","Nit","Nombre tercero","Saldo Mes"]]
             .sort_values("Saldo Mes", key=abs, ascending=False).reset_index(drop=True))
         df_de["Saldo Mes"] = df_de["Saldo Mes"].apply(fmt_cop)
         st.dataframe(df_de, use_container_width=True, height=400)
