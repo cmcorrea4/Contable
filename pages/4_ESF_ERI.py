@@ -155,10 +155,15 @@ def fmt_cop(val):
 
 # Nombres que indican "período anterior" en la columna Mes del archivo fuente
 _MES_ANT_TOKENS = {"PERIODO ANTERIOR", "PERÍODO ANTERIOR", "PERIOD ANTERIOR",
-                   "ANO ANTERIOR", "AÑO ANTERIOR", "ANTERIOR"}
+                   "ANO ANTERIOR", "AÑO ANTERIOR", "ANTERIOR",
+                   "PERIODOANT", "PERIODOANTER", "PER ANTERIOR", "PERanterior"}
 
 def _es_mes_anterior(nombre_mes: str) -> bool:
-    return str(nombre_mes).strip().upper() in _MES_ANT_TOKENS
+    s = str(nombre_mes).strip().upper()
+    if s in _MES_ANT_TOKENS:
+        return True
+    # Detección flexible: contiene "ANTERIOR" o empieza con "PERIOD" y contiene "ANT"
+    return "ANTERIOR" in s or ("PERIOD" in s and "ANT" in s)
 
 
 @st.cache_data(show_spinner="Procesando archivo…")
@@ -1024,8 +1029,8 @@ def generar_hoja_anexo(ws, df_raw_src, titulo, es_pivot=True, grupos_orden=None)
         # Pivot base: Grupo × Mes
         piv_grp = (df.groupby(["Grupo", "Mes"])["Saldo Mes"].sum()
                    .unstack(fill_value=0).reindex(columns=MESES, fill_value=0))
-        # Pivot cuenta: Cuenta × Mes (clave = Codigo + Nombre cuenta)
-        df["_cuenta"] = df["Codigo"].astype(str).str.strip() + "  " + df["Nombre cuenta"].str.strip()
+        # Pivot cuenta: Cuenta × Mes (clave = Nombre cuenta)
+        df["_cuenta"] = df["Nombre cuenta"].str.strip()
         piv_cta = (df.groupby(["_cuenta", "Grupo", "Mes"])["Saldo Mes"].sum()
                    .unstack(fill_value=0).reindex(columns=MESES, fill_value=0).reset_index())
         # Pivot tercero: Tercero × Mes (clave = Nit + Nombre tercero)
@@ -1422,6 +1427,22 @@ with tab_exportar:
     # Opción 2: archivo separado del año anterior
     saldos_esf_ant  = _saldos_esf_ant_auto
     totales_eri_ant = _totales_eri_ant_auto
+
+    # ── Diagnóstico: mostrar valores detectados para período anterior ──────────
+    with st.expander("🔍 Diagnóstico período anterior (expandir para ver)", expanded=False):
+        st.write("**`_saldos_esf_ant_auto`:**", _saldos_esf_ant_auto)
+        st.write("**`_totales_eri_ant_auto`:**", _totales_eri_ant_auto)
+        # Mostrar valores únicos de Mes en el archivo para verificar el token
+        from openpyxl import load_workbook as _lwb
+        import io as _io
+        try:
+            _wb_d = _lwb(_io.BytesIO(file_bytes))
+            _ws_d = next((s for s in _wb_d.sheetnames if s.lower().startswith("terceros")), None)
+            if _ws_d:
+                _df_d = pd.read_excel(_io.BytesIO(file_bytes), sheet_name=_ws_d)
+                st.write("**Valores únicos en columna Mes:**", list(_df_d["Mes"].astype(str).str.strip().unique()))
+        except Exception as _ex:
+            st.write("(no se pudo leer Mes):", _ex)
 
     if _saldos_esf_ant_auto:
         st.success("✅ Período anterior detectado en el mismo archivo (fila con Mes = 'PERIODO ANTERIOR')")
