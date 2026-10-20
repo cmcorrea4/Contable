@@ -176,12 +176,6 @@ def procesar_archivo(file_bytes: bytes):
     df = pd.read_excel(BytesIO(file_bytes), sheet_name="terceros_", header=0)
     df.columns = [c.strip() for c in df.columns]
     df["Saldo Mes"] = pd.to_numeric(df["Saldo Mes"], errors="coerce").fillna(0)
-    # Normalizar espacios en Grupo para evitar mismatches por trailing spaces
-    if "Grupo" in df.columns:
-        df["Grupo"] = df["Grupo"].str.strip().map(
-            lambda x: next((g for g in (list(GRUPOS_ESF_ORDEN) + list(GRUPOS_ERI))
-                            if g.strip() == x), x) if pd.notna(x) else x
-        )
 
     # ── Separar filas de "período anterior" si existen en la misma hoja ─────
     mask_ant = df["Mes"].apply(_es_mes_anterior)
@@ -193,24 +187,18 @@ def procesar_archivo(file_bytes: bytes):
     totales_eri_ant_auto = None
 
     if not df_ant.empty:
-        # Normalizar espacios en Grupo para que el match sea robusto
-        df_ant = df_ant.copy()
-        df_ant["_Grupo_norm"] = df_ant["Grupo"].str.strip()
-
         # ESF anterior — saldo por grupo (igual que saldos_esf del período actual)
-        # Comparamos contra versión stripped de cada grupo definido
-        saldos_esf_ant_auto = {}
-        for g in GRUPOS_ESF_ORDEN:
-            g_norm = g.strip()
-            saldo = df_ant[df_ant["_Grupo_norm"] == g_norm]["Saldo Mes"].sum()
-            saldos_esf_ant_auto[g] = saldo
-
+        esf_ant_grp = df_ant[df_ant["Grupo"].isin(GRUPOS_ESF_ORDEN)]
+        saldos_esf_ant_auto = {
+            g: esf_ant_grp[esf_ant_grp["Grupo"] == g]["Saldo Mes"].sum()
+            for g in GRUPOS_ESF_ORDEN
+        }
         # ERI anterior — acumulado por grupo
-        totales_eri_ant_auto = {}
-        for g in GRUPOS_ERI:
-            g_norm = g.strip()
-            saldo = df_ant[df_ant["_Grupo_norm"] == g_norm]["Saldo Mes"].sum()
-            totales_eri_ant_auto[g] = saldo
+        eri_ant_grp = df_ant[df_ant["Grupo"].isin(GRUPOS_ERI)]
+        totales_eri_ant_auto = {
+            g: eri_ant_grp[eri_ant_grp["Grupo"] == g]["Saldo Mes"].sum()
+            for g in GRUPOS_ERI
+        }
 
     def build_pivot(df_src, grupos):
         df_f = df_src[df_src["Grupo"].isin(grupos)].copy()
