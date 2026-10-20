@@ -187,16 +187,17 @@ def procesar_archivo(file_bytes: bytes):
     totales_eri_ant_auto = None
 
     if not df_ant.empty:
+        # Normalizar espacios en Grupo para match robusto (trailing spaces)
+        df_ant = df_ant.copy()
+        df_ant["_Grupo_norm"] = df_ant["Grupo"].str.strip()
         # ESF anterior — saldo por grupo (igual que saldos_esf del período actual)
-        esf_ant_grp = df_ant[df_ant["Grupo"].isin(GRUPOS_ESF_ORDEN)]
         saldos_esf_ant_auto = {
-            g: esf_ant_grp[esf_ant_grp["Grupo"] == g]["Saldo Mes"].sum()
+            g: df_ant[df_ant["_Grupo_norm"] == g.strip()]["Saldo Mes"].sum()
             for g in GRUPOS_ESF_ORDEN
         }
         # ERI anterior — acumulado por grupo
-        eri_ant_grp = df_ant[df_ant["Grupo"].isin(GRUPOS_ERI)]
         totales_eri_ant_auto = {
-            g: eri_ant_grp[eri_ant_grp["Grupo"] == g]["Saldo Mes"].sum()
+            g: df_ant[df_ant["_Grupo_norm"] == g.strip()]["Saldo Mes"].sum()
             for g in GRUPOS_ERI
         }
 
